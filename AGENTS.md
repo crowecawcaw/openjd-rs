@@ -239,18 +239,20 @@ PRs run these checks (all must pass):
 | **Conformance** | Full OpenJD conformance suite (1,038 tests) on all three platforms |
 | **MSRV** | `cargo check --workspace` with Rust 1.92 |
 | **Documentation** | `cargo doc --no-deps --workspace` with `-D warnings` |
-| **Compliance** | Copyright header check + `THIRD-PARTY-LICENSES` freshness (`cargo about`) |
+| **Compliance** | Copyright header check |
 | **Cross-User (Linux)** | Docker-based cross-user tests: localuser and LDAP variants |
 | **Cross-User (Windows)** | Windows cross-user and permissions tests with a temporary test user |
 | **openjd-for-js** | Builds the wasm32 crate with `wasm-bindgen` and runs the vitest suite |
 
-After updating dependencies (anything that changes `Cargo.lock`),
-regenerate `THIRD-PARTY-LICENSES` so the Compliance job stays green:
+The third-party license attribution file (`THIRD-PARTY-LICENSES`) is **not**
+committed to source and does **not** gate PRs. It is generated at release time
+and attached to each GitHub Release as a build artifact (see the Releasing
+section). To produce it locally for inspection:
 ```bash
-bash scripts/check_third_party_licenses.sh --update
+bash scripts/generate_third_party_licenses.sh
 ```
 
-If the update bumps `wasm-bindgen`, also bump the matching
+If a dependency update bumps `wasm-bindgen`, also bump the matching
 `wasm-bindgen-cli` version pinned in the `openjd-for-js` job in
 `.github/workflows/ci.yml` — the CLI and the linked Wasm schema version must
 match exactly.
@@ -267,6 +269,7 @@ Releases are automated via [release-plz](https://release-plz.dev/). Every push t
 
 - Published crates: `openjd-expr`, `openjd-model`, `openjd-sessions`, `openjd-cli`, `openjd-snapshots` — independent versions, conventional-commit-driven bumps.
 - Non-published crate: `openjd-for-js` — marked `publish = false`.
+- Third-party license attribution: the release job runs `scripts/generate_third_party_licenses.sh` and attaches the resulting `THIRD-PARTY-LICENSES` to each GitHub Release. This covers distributed artifacts that embed dependency code (e.g. the `openjd` binary); published crates do not bundle their dependencies, so the `.crate` itself carries no such file.
 
 See [RELEASING.md](RELEASING.md) for the full process, one-time setup steps, and how to add new crates.
 
