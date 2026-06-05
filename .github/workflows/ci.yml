@@ -72,13 +72,6 @@ jobs:
       - uses: actions/checkout@v6
       - name: Check copyright headers
         run: bash scripts/check_copyright_headers.sh
-      # Third-party license attribution is NOT checked here. The attribution
-      # file is generated at release time and attached to each GitHub Release
-      # (see .github/workflows/release-plz.yml). Published crates don't bundle
-      # their dependencies, so verifying a committed copy on every PR added no
-      # legal value and broke Dependabot PRs (which bump Cargo.lock but cannot
-      # regenerate the file). cargo-deny (above) still enforces the license
-      # *policy* — only pre-approved permissive licenses are allowed.
 
   # Build, test, and conformance share a single release-profile target/ cache.
   # This avoids maintaining separate debug and release caches for the same
