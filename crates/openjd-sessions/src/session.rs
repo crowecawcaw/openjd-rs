@@ -990,6 +990,9 @@ impl Session {
         self.action.ended_at = Some(std::time::SystemTime::now());
         self.action.exit_code = None;
         self.cancel.reset();
+        // Brittle-session contract: a failed action setup makes the session
+        // ending-only permanently. Persist the flag, not just `state`.
+        self.ending_only = true;
         self.state = SessionState::ReadyEnding;
         self.notify_callback();
         e
@@ -1964,10 +1967,15 @@ impl Session {
         self.action.ended_at = Some(std::time::SystemTime::now());
         self.action.exit_code = r.exit_code;
         self.cancel.reset();
-        self.state = if final_state == ActionState::Success {
-            SessionState::Ready
-        } else {
+        // Brittle-session contract: a non-Success action makes the session
+        // ending-only permanently. Persist the flag, not just `state`.
+        if final_state != ActionState::Success {
+            self.ending_only = true;
+        }
+        self.state = if self.ending_only {
             SessionState::ReadyEnding
+        } else {
+            SessionState::Ready
         };
         self.notify_callback();
         Ok(crate::subprocess::SubprocessResult {
@@ -2032,6 +2040,9 @@ impl Session {
                 self.action.ended_at = Some(std::time::SystemTime::now());
                 self.action.exit_code = None;
                 self.cancel.reset();
+                // Brittle-session contract: a failed action makes the session
+                // ending-only permanently. Persist the flag, not just `state`.
+                self.ending_only = true;
                 self.state = SessionState::ReadyEnding;
 
                 if let Some(cb) = &self.callback {
@@ -2057,7 +2068,14 @@ impl Session {
         self.action.exit_code = r.exit_code;
         self.cancel.reset();
 
-        self.state = if self.ending_only || final_state != ActionState::Success {
+        // Brittle-session contract: once any action completes non-Success
+        // (Failed/Canceled/Timeout), the session becomes ending-only for the
+        // rest of its lifetime and must never return to plain Ready. Persist
+        // this in `ending_only`, not just the transient `state`.
+        if final_state != ActionState::Success {
+            self.ending_only = true;
+        }
+        self.state = if self.ending_only {
             SessionState::ReadyEnding
         } else {
             SessionState::Ready

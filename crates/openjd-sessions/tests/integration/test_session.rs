@@ -365,6 +365,81 @@ async fn test_no_task_run_after_fail() {
     assert_eq!(s.state(), SessionState::ReadyEnding);
 }
 
+/// Regression: the brittle-session contract must survive a *successful*
+/// exit_environment(keep_session_running=true) after a failed action.
+///
+/// Previously, a failed action only set the transient `state = ReadyEnding`
+/// but never the persistent `ending_only` flag. A subsequent exit whose onExit
+/// script succeeded recomputed the state as `Ready`, un-bricking the session
+/// and wrongly accepting new run_task / enter_environment calls.
+#[tokio::test]
+async fn test_ending_only_persists_after_failed_task_and_successful_exit() {
+    let tmp = TempDir::new().unwrap();
+    let mut s = Session::new_for_test(tmp.path().to_path_buf());
+
+    // An environment with a succeeding onExit script — the exit itself succeeds.
+    let env = Environment {
+        name: "env1".into(),
+        description: None,
+        script: Some(EnvironmentScript {
+            let_bindings: None,
+            actions: EnvironmentActions {
+                on_enter: None,
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
+                on_exit: Some(action("sh", vec!["-c", "echo exited"])),
+            },
+            embedded_files: None,
+        }),
+        variables: None,
+        resolved_symtab: None,
+    };
+    let id = s.enter_environment(&env, None, None, None).await.unwrap();
+
+    // Run a task that FAILS — session becomes brittle (ReadyEnding).
+    s.run_task("step1", &step("sh", vec!["-c", "exit 1"]), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(s.state(), SessionState::ReadyEnding);
+
+    // Exit the environment but ask to keep the session running. The onExit
+    // script succeeds, but the session MUST remain ending-only.
+    s.exit_environment(&id, None, true, None).await.unwrap();
+    assert_eq!(
+        s.state(),
+        SessionState::ReadyEnding,
+        "session must stay ReadyEnding after a failed action, even when a later exit succeeds"
+    );
+
+    // A subsequent run_task must be rejected with InvalidState (expected=[Ready]).
+    let err = s
+        .run_task("step2", &step("sh", vec!["-c", "echo hi"]), None, None, None)
+        .await
+        .unwrap_err();
+    match err {
+        openjd_sessions::error::SessionError::InvalidState { expected, current } => {
+            assert_eq!(expected, &[SessionState::Ready]);
+            assert_eq!(current, SessionState::ReadyEnding);
+        }
+        other => panic!("expected InvalidState from run_task, got: {other}"),
+    }
+
+    // A subsequent enter_environment must likewise be rejected with InvalidState.
+    let env2 = env_with_enter("env2", "sh", vec!["-c", "echo entered"]);
+    let err = s
+        .enter_environment(&env2, None, None, None)
+        .await
+        .unwrap_err();
+    match err {
+        openjd_sessions::error::SessionError::InvalidState { expected, current } => {
+            assert_eq!(expected, &[SessionState::Ready]);
+            assert_eq!(current, SessionState::ReadyEnding);
+        }
+        other => panic!("expected InvalidState from enter_environment, got: {other}"),
+    }
+}
+
 #[tokio::test]
 async fn test_run_task_with_variables() {
     let tmp = TempDir::new().unwrap();
