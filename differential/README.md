@@ -16,6 +16,30 @@ It is the complement of the sibling [`fuzz/`](../fuzz) crate: the fuzzer asks
 "does any input crash?", this asks "does any input compute a *different answer*
 than the reference?".
 
+## Why Python is the oracle (and the limits of that)
+
+The OpenJD spec **names Python as the reference implementation** of the
+expression language: RFC 0005 states "Reference implementation of OpenJD is in
+Python," and the published spec points at the `openjd.expr` namespace of the
+`openjd-model-for-python` package. So when the Rust port disagrees with Python,
+the port is — by default — the one that broke compatibility, and Python is the
+answer to match.
+
+This is **not** a formal guarantee that Python's behavior is normatively
+correct in every case. The spec's own wording is "implementations *should*
+follow these patterns *to the extent that the implementation language supports
+them*" — it explicitly allows deviation where languages differ. So the rule
+this harness enforces is not "Python is always right" but:
+
+> **Match Python everywhere, except where we have made a deliberate, documented
+> decision to differ — recorded in `allowlist.json` with a reason.**
+
+The clearest example of a justified deviation: turning Python's *silent integer
+overflow* into an explicit Rust error is arguably a fix, not a regression. Such
+choices belong in the allowlist, not in a "just match Python" reflex. Every
+allowlist entry is a place where we judged the deviation worth keeping; every
+other disagreement is treated as a Rust bug.
+
 This crate is **not** a member of the root workspace (it has its own empty
 `[workspace]` table) because it depends on an out-of-tree Python checkout. It
 runs in its own [`.github/workflows/differential.yml`](../.github/workflows/differential.yml)

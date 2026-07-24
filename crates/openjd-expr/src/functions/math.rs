@@ -293,10 +293,10 @@ fn round_int_neg(i: i64, k: u64) -> R {
     }
     let pow = 10i64.pow(k as u32);
     let rem = i.rem_euclid(pow); // in [0, pow); floored remainder
-    // Largest multiple of `pow` that is <= i (works for negatives). `i - rem`
-    // can underflow for i near i64::MIN, so use checked subtraction; on
-    // underflow the floor multiple is unrepresentable but the rounded-up value
-    // may still be, so fall through to the overflow-checked add below.
+                                 // Largest multiple of `pow` that is <= i (works for negatives). `i - rem`
+                                 // can underflow for i near i64::MIN, so use checked subtraction; on
+                                 // underflow the floor multiple is unrepresentable but the rounded-up value
+                                 // may still be, so fall through to the overflow-checked add below.
     let down = i.checked_sub(rem);
     let half = pow / 2;
     // Decide whether to round up to `down + pow`, ties to even.
@@ -324,7 +324,6 @@ fn round_int_neg(i: i64, k: u64) -> R {
     };
     Ok(ExprValue::Int(result))
 }
-
 
 pub fn sum_list(ctx: Ctx, a: &[ExprValue]) -> R {
     if let Some(iter) = a[0].list_iter() {
