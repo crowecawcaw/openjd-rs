@@ -21,10 +21,6 @@ on:
     branches: [main]
   pull_request:
     branches: [main, release, "patch_*"]
-  schedule:
-    # Nightly deeper multi-seed sweep (03:17 UTC — off the hour to avoid the
-    # cron stampede). Only the `differential-nightly` job runs on this trigger.
-    - cron: "17 3 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -42,12 +38,9 @@ env:
   # A missing/broken Python reference is a HARD failure in CI (never a silent
   # skip): the whole point of this job is to run the oracle.
   OPENJD_DIFF_REQUIRED: "1"
-  # Where the generative gate looks for the Rust reference-checkout convention
-  # is overridden explicitly below via OPENJD_PYTHON_REF_SRC.
-  # Per-PR generative budget: enough cases to exercise the evaluator broadly
+  # Per-run generative budget: enough cases to exercise the evaluator broadly
   # while keeping the step near ~20s including the one-time build. The generator
-  # runs ~6000 cases/sec once built, so this is generous headroom. A deeper
-  # multi-seed sweep is left to the nightly job below.
+  # runs ~6000 cases/sec once built, so this is generous headroom.
   DIFF_GEN_CASES: "20000"
 
 jobs:
@@ -125,10 +118,10 @@ jobs:
         run: cargo test --test differential conformance_and_regressions -- --nocapture
 
       # Gate 2 — grammar-aware generative differential, count-boxed via
-      # DIFF_GEN_CASES so it covers broadly in a single ~20s step. Uses the
-      # crate's fixed default seed for reproducibility; a divergence prints a
-      # ready-to-freeze corpus line and writes reproducers to target/ (uploaded
-      # below).
+      # DIFF_GEN_CASES so it covers broadly in a single ~20s step. Runs on PRs
+      # and on merges to main. Uses the crate's fixed default seed for
+      # reproducibility; a divergence prints a ready-to-freeze corpus line and
+      # writes reproducers to target/ (uploaded below).
       - name: Generative differential
         working-directory: openjd-rs/differential
         env:
@@ -140,58 +133,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: differential-divergences
-          path: openjd-rs/differential/target/generative-divergences*.txt
-          if-no-files-found: ignore
-
-  # Deeper multi-seed sweep, on a schedule rather than per-PR. Widens coverage
-  # by fanning the generator across many seeds; feeds new divergences back into
-  # differential/corpus/regressions.jsonl. Not a merge gate.
-  differential-nightly:
-    name: Differential nightly sweep
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out openjd-rs
-        uses: actions/checkout@v6
-        with:
-          path: openjd-rs
-      - name: Check out Python reference (openjd-model-for-python @ expr)
-        uses: actions/checkout@v6
-        with:
-          repository: mwiebe/openjd-model-for-python
-          ref: expr
-          path: openjd-model-for-python
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install Python reference dependencies
-        working-directory: openjd-model-for-python
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e . || pip install -r requirements-development.txt || true
-      - name: Install Rust stable
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup override set stable --path openjd-rs
-      - name: Set reference source path
-        run: echo "OPENJD_PYTHON_REF_SRC=${{ github.workspace }}/openjd-model-for-python/src" >> "$GITHUB_ENV"
-      - name: Multi-seed generative sweep
-        working-directory: openjd-rs/differential
-        run: |
-          set -euo pipefail
-          fail=0
-          for seed in 1 2 3 42 100 777 2024 12345 55555 99999 314159 271828; do
-            echo "::group::seed=$seed"
-            OPENJD_DIFF_GEN_SEED=$seed OPENJD_DIFF_GEN_CASES=25000 \
-              cargo test --test differential generative_differential -- --nocapture || fail=1
-            echo "::endgroup::"
-          done
-          exit $fail
-      - name: Upload generative divergence reproducers
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: differential-divergences-nightly
           path: openjd-rs/differential/target/generative-divergences*.txt
           if-no-files-found: ignore

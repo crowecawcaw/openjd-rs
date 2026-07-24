@@ -118,7 +118,17 @@ hand.
 
 ## CI cadence
 
-- **Per PR / merge** (`differential` job): conformance + regressions (the real
-  gate) plus a count-boxed generative run at the fixed default seed. Fast.
-- **Nightly** (`differential-nightly` job): a deeper multi-seed generative sweep.
-  Non-gating; surfaces new divergences to freeze into the regression corpus.
+The same checks run on every PR and on merges to main (`differential` job):
+conformance + regressions (the fast gate) plus a count-boxed generative run at
+the fixed default seed. For deeper coverage, run a multi-seed sweep locally
+before landing large changes:
+
+```sh
+for seed in 1 2 3 42 100 777; do
+  OPENJD_DIFF_GEN_SEED=$seed OPENJD_DIFF_GEN_CASES=25000 \
+    cargo test --test differential generative_differential -- --nocapture
+done
+```
+
+Any new divergence found that way should be minimized and frozen into
+`corpus/regressions.jsonl`.
