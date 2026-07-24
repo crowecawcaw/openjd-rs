@@ -1,0 +1,14 @@
+{
+  "_comment": "Intentional, reviewed divergences between openjd-expr (Rust) and the Python reference. Python is the OpenJD spec's NAMED reference implementation (RFC 0005), so matching it is the default; but the spec only says implementations 'should' follow it 'to the extent the language supports' — it does NOT declare Python normatively correct in every case. So the rule is: match Python EVERYWHERE except deliberate, documented deviations listed here with a `reason`. A divergence is downgraded to a PASS only if its exact `input` is listed. Adding an entry is a deliberate act reviewed in the PR that adds it. See src/allowlist.rs and differential/README.md. Keep this list SHORT: prefer fixing the Rust side. Entries here belong to documented KNOWN CLASSES that a broad generative sweep reproduces in many wrapped forms; the CI gate uses the fixed default seed (which these exact inputs cover). A local multi-seed sweep (see README) may surface wrapped variants of these same classes — that is expected. A divergence that is NOT one of these classes is a real bug to fix, not an allowlist addition.",
+  "known_classes": [
+    "float-literal-preservation: Rust preserves a float's original source literal through max/min/abs (rendering e.g. '9.2e18'), while the Python reference discards it and reformats the identical f64 value ('9.2e+18'). Same numeric value, different exponent spelling. Which policy is canonical is an open upstream design question.",
+    "round-neg-ndigits-double-rounding: round(float, -k) on a value near 2^63 can disagree with Python by one unit in the last place. Matching exactly would require reimplementing CPython's David-Gay/dtoa correctly-rounded decimal scaling; the magnitude of disagreement is 1 ulp at ~1e18."
+  ],
+  "allowed": [
+    {
+      "input": "max(9.2e18, 275)",
+      "reason": "float-literal-preservation class. Rust renders the preserved literal '9.2e18'; Python reformats to '9.2e+18'. Same f64 value.",
+      "reference": "openjd-rs expr literal-preservation policy (TODO: link tracking issue)"
+    }
+  ]
+}

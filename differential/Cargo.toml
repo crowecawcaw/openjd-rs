@@ -1,0 +1,33 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Copyright by contributors to this project.
+# SPDX-License-Identifier: (Apache-2.0 OR MIT)
+
+[package]
+name = "openjd-differential"
+version = "0.0.0"
+publish = false
+edition = "2021"
+description = "Differential oracle testing openjd-expr against the Python reference implementation."
+
+# Keep this crate out of the root workspace. It exists only to run differential
+# tests against an out-of-tree Python reference checkout, so it should never be
+# pulled into the stable build/test/clippy/MSRV matrix that compiles the
+# publishable crates. An empty `[workspace]` table makes it its own workspace
+# root (mirroring the sibling `fuzz/` crate).
+[workspace]
+
+[dependencies]
+openjd-expr = { path = "../crates/openjd-expr" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Deterministic PRNG for the grammar-aware generator. `rand` alone (no
+# `getrandom`) keeps the generator fully reproducible from a fixed seed.
+rand = { version = "0.8", default-features = false, features = ["small_rng"] }
+
+[dev-dependencies]
+# The differential tests spawn a long-lived Python worker and are meaningless
+# without the Python reference checkout. They are opt-in via a feature so a
+# plain `cargo test` in this crate (e.g. a developer without the reference)
+# doesn't fail spuriously; CI enables the feature explicitly.
+[features]
+default = []
