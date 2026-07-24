@@ -419,3 +419,15 @@ fn float_gt_string_errors() {
         "got:\n{e}"
     );
 }
+
+// Mixed path/string comparison compares by string value and must preserve
+// operand order. A prior bug swapped the operands when the path was on the
+// left, so `path('/tmp/x') < 'ab'` returned the wrong boolean ('/' (0x2f) is
+// less than 'a' (0x61), so the correct answer is true).
+#[test]
+fn path_lt_string_operand_order() {
+    assert_eq!(eval("path('/tmp/x') < 'ab'").to_display_string(), "true");
+    assert_eq!(eval("'ab' < path('/tmp/x')").to_display_string(), "false");
+    // Symmetric with the pure-string comparison.
+    assert_eq!(eval("'/tmp/x' < 'ab'").to_display_string(), "true");
+}

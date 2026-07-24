@@ -180,6 +180,25 @@ fn float_from_float() {
     assert_eq!(eval("float(3.14)").to_display_string(), "3.14");
 }
 
+// float(x) is an identity that PRESERVES the original literal (a copy, not a
+// computation — RFC 0005 float pass-through). Reconstructing the value would
+// reformat `1e308` to the computed form `1e+308`.
+#[test]
+fn float_from_float_preserves_literal() {
+    assert_eq!(eval("float(1e308)").to_display_string(), "1e308");
+    assert_eq!(eval("float(9.2e18)").to_display_string(), "9.2e18");
+}
+
+// int(float) is only valid for whole values (RFC 0006: no destructive
+// conversion). A non-whole float — however tiny — is an error, not truncation.
+#[test]
+fn int_from_non_whole_float_is_error() {
+    assert!(eval_fails("int(0.5)"));
+    assert!(eval_fails("int(3.75)"));
+    // A whole-valued float still converts.
+    assert_eq!(eval("int(3.0)").to_display_string(), "3");
+}
+
 #[test]
 fn bool_from_bool() {
     assert_eq!(eval("bool(True)").to_display_string(), "true");

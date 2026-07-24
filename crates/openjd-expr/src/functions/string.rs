@@ -345,7 +345,11 @@ pub fn capitalize_fn(ctx: Ctx, a: &[ExprValue]) -> R {
 pub fn center_fn(ctx: Ctx, a: &[ExprValue]) -> R {
     let s = get_str(&a[0])?;
     let width = match &a[1] {
-        ExprValue::Int(w) => *w as usize,
+        // A negative width is not an error in Python — it just means "no
+        // padding" (the string is already at least that wide). Clamp to 0;
+        // casting `-1` straight to `usize` would wrap to `usize::MAX` and blow
+        // the op-count limit (or, without it, attempt a catastrophic alloc).
+        ExprValue::Int(w) => (*w).max(0) as usize,
         _ => return Err(ExpressionError::new("center() width must be int")),
     };
     ctx.count_string_ops(width.max(s.len()))?;
@@ -353,8 +357,12 @@ pub fn center_fn(ctx: Ctx, a: &[ExprValue]) -> R {
     if clen >= width {
         return Ok(ExprValue::String(s.to_string()));
     }
+    // Match CPython `str.center`'s bias exactly: when the padding is odd, the
+    // extra space goes on the *left* iff `marg & width` is odd. The naive
+    // `left = pad / 2` biases the extra space right instead, which disagrees
+    // with the Python reference (e.g. `center('ab', 11)` → `'     ab    '`).
     let pad = width - clen;
-    let left = pad / 2;
+    let left = pad / 2 + (pad & width & 1);
     let right = pad - left;
     Ok(ExprValue::String(format!(
         "{}{}{}",
@@ -367,7 +375,8 @@ pub fn center_fn(ctx: Ctx, a: &[ExprValue]) -> R {
 pub fn ljust_fn(ctx: Ctx, a: &[ExprValue]) -> R {
     let s = get_str(&a[0])?;
     let width = match &a[1] {
-        ExprValue::Int(w) => *w as usize,
+        // Negative width clamps to 0 (no padding); see `center_fn`.
+        ExprValue::Int(w) => (*w).max(0) as usize,
         _ => return Err(ExpressionError::new("ljust() width must be int")),
     };
     ctx.count_string_ops(width.max(s.len()))?;
@@ -377,7 +386,8 @@ pub fn ljust_fn(ctx: Ctx, a: &[ExprValue]) -> R {
 pub fn rjust_fn(ctx: Ctx, a: &[ExprValue]) -> R {
     let s = get_str(&a[0])?;
     let width = match &a[1] {
-        ExprValue::Int(w) => *w as usize,
+        // Negative width clamps to 0 (no padding); see `center_fn`.
+        ExprValue::Int(w) => (*w).max(0) as usize,
         _ => return Err(ExpressionError::new("rjust() width must be int")),
     };
     ctx.count_string_ops(width.max(s.len()))?;
