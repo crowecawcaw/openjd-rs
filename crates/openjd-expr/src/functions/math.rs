@@ -285,6 +285,16 @@ pub fn round_fn(ctx: Ctx, a: &[ExprValue]) -> R {
 /// Round integer `i` to the nearest multiple of `10^k`, ties to even (matching
 /// Python's `round(int, -k)`). Exact — no float round-trip. Returns an overflow
 /// error if the result leaves the `i64` range.
+///
+/// This exact-integer path was reviewed as an allowlist candidate: it only
+/// changes results for `|i| > 2^52`, which real job-template arithmetic (frame
+/// numbers, worker counts, memory sizes) never reaches, and it is more involved
+/// than the alternative f64 round-trip. It was deliberately kept rather than
+/// reverted+allowlisted: the code is small and self-contained, and reverting
+/// would re-introduce a divergence the differential generator produces in many
+/// wrapped forms — trading tested code for a recurring allowlist class. Do not
+/// "simplify" it back to `round_half_even(i as f64 / factor) * factor` without
+/// re-adding that allowlist entry.
 fn round_int_neg(i: i64, k: u64) -> R {
     // 10^k overflows i64 past k == 18; at that scale any i64 rounds to 0
     // (its magnitude is below half of 10^19).
