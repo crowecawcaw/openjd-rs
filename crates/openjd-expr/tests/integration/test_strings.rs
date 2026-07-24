@@ -2554,3 +2554,34 @@ fn repr_sh_list_with_null_byte_returns_error() {
         "repr_sh on list with null-byte string should error"
     );
 }
+
+// Negative or zero width means "no padding": the string is returned unchanged.
+// A prior bug cast the negative width straight to usize (wrapping to a huge
+// value), tripping the operation limit or attempting a giant allocation.
+#[test]
+fn center_negative_width_no_padding() {
+    assert_eq!(eval("center('a', -1)").to_display_string(), "a");
+    assert_eq!(eval("center('ab', 0)").to_display_string(), "ab");
+}
+#[test]
+fn ljust_negative_width_no_padding() {
+    assert_eq!(eval("ljust('a', -1)").to_display_string(), "a");
+}
+#[test]
+fn rjust_negative_width_no_padding() {
+    assert_eq!(eval("rjust('a', -1)").to_display_string(), "a");
+}
+
+// center() odd-padding bias matches CPython exactly, where the side that gets
+// the extra space depends on `marg & width & 1` (NOT a fixed side). The prior
+// implementation used a fixed `pad/2` split and disagreed with Python on cases
+// like center('ab', 11). Verified against CPython str.center.
+#[test]
+fn center_odd_padding_bias() {
+    // width 11, pad 9: 5 leading, 4 trailing.
+    assert_eq!(eval("center('ab', 11)").to_display_string(), "     ab    ");
+    // width 5, pad 4 (even): 2 and 2.
+    assert_eq!(eval("center('a', 5)").to_display_string(), "  a  ");
+    // width 4, pad 3 (odd): 1 leading, 2 trailing.
+    assert_eq!(eval("center('a', 4)").to_display_string(), " a  ");
+}

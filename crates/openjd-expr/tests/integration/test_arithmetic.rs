@@ -92,6 +92,16 @@ fn float_precision_display() {
     assert_eq!(eval("0.1 + 0.2").to_display_string(), "0.30000000000000004");
 }
 
+// A computed float outside [1e-4, 1e16) uses scientific notation with a C/Python
+// style exponent: sign plus at least two digits (`e+18`, `e-07`), not Rust's
+// bare `e18` / `e-7`.
+#[test]
+fn float_scientific_notation_exponent_format() {
+    assert_eq!(eval("9.2e18 + 0.0").to_display_string(), "9.2e+18");
+    assert_eq!(eval("1e17 * 10.0").to_display_string(), "1e+18");
+    assert_eq!(eval("5e-8 + 0.0").to_display_string(), "5e-08");
+}
+
 #[test]
 fn float_passthrough_preserves_original() {
     let mut st = SymbolTable::new();
@@ -155,12 +165,56 @@ fn floordiv_float_truncates_negative() {
     assert_eq!(eval("-7.5 // 2.0").to_display_string(), "-4");
 }
 
+// Float floor-division must reproduce CPython's `float_divmod`, not the naive
+// `(l/r).floor()`: because the true quotient is only approximated in f64, plain
+// flooring rounds the wrong way at ties. `0.1` is slightly greater than 1/10,
+// so `205 / 0.1` is just under 2050 and Python floors it to 2049.
+#[test]
+fn floordiv_float_tie_matches_cpython() {
+    assert_eq!(eval("205 // 0.1").to_display_string(), "2049");
+}
+
+// Large-magnitude float floor-division keeps full precision (no `(l/r).floor()`
+// round-trip loss): 9.2e18 // -568 == -16197183098591552, exactly.
+#[test]
+fn floordiv_float_large_magnitude() {
+    assert_eq!(
+        eval("abs(-9.2e18) // -568").to_display_string(),
+        "-16197183098591552"
+    );
+}
+
+// A float floor-division whose quotient exceeds i64 is an overflow error, not a
+// saturating cast. `9.223372036854776e18` is exactly 2^63 as an f64.
+#[test]
+fn floordiv_float_overflow_is_error() {
+    assert_err("9.223372036854776e18 // 1", &["Integer overflow"]);
+}
+
 #[test]
 fn floordiv_by_zero_int() {
     assert_err(
         "10 // 0",
         &["Division by zero\n", "  10 // 0\n", "  ~~~^~~~"],
     );
+}
+
+// Float modulo must use CPython's fmod-based algorithm, not `l - r*floor(l/r)`,
+// which loses all precision when |l/r| is huge: `9.2e18 % 0.1` collapses to 0.0
+// under the naive form but is 2.842170943040401e-14 under fmod.
+#[test]
+fn mod_float_large_magnitude_precision() {
+    assert_eq!(
+        eval("9223372036854775807 % 0.1").to_display_string(),
+        "2.842170943040401e-14"
+    );
+}
+
+// Floored modulo: the result takes the divisor's sign (matching Python).
+#[test]
+fn mod_float_sign_follows_divisor() {
+    assert_eq!(eval("-5.5 % 2.0").to_display_string(), "0.5");
+    assert_eq!(eval("5.5 % -2.0").to_display_string(), "-0.5");
 }
 
 #[test]
@@ -190,6 +244,17 @@ fn int_power_negative_exponent() {
 #[test]
 fn int_power_zero() {
     assert_eq!(eval("5 ** 0").to_display_string(), "1");
+}
+
+// int ** negative exponent must be computed as float `powf`, not `powi`
+// (repeated squaring): `powi` accumulates a last-ulp error. `956 ** -74` is
+// 2.793289646093924e-221 under powf, matching CPython's float `pow`.
+#[test]
+fn int_power_negative_exponent_precision() {
+    assert_eq!(
+        eval("956 ** -74").to_display_string(),
+        "2.793289646093924e-221"
+    );
 }
 
 #[test]
@@ -361,11 +426,16 @@ fn round_ndigits_0_75() {
 }
 #[test]
 fn round_ndigits_2_5_0() {
-    assert_eq!(eval("round(2.5, 0)").to_display_string(), "2.0");
+    // round(float, 0) returns an INT, matching Python (banker's rounding).
+    assert_eq!(eval("round(2.5, 0)").to_display_string(), "2");
+    assert_eq!(
+        eval("round(2.5, 0)").expr_type(),
+        openjd_expr::ExprType::INT
+    );
 }
 #[test]
 fn round_ndigits_3_5_0() {
-    assert_eq!(eval("round(3.5, 0)").to_display_string(), "4.0");
+    assert_eq!(eval("round(3.5, 0)").to_display_string(), "4");
 }
 
 #[test]
@@ -399,6 +469,38 @@ fn round_int_ndigits_150_neg2() {
 #[test]
 fn round_int_ndigits_250_neg2() {
     assert_eq!(eval("round(250, -2)").to_display_string(), "200");
+}
+
+// round(int, -k) is exact integer arithmetic: a large int keeps every digit
+// above the rounding position. An f64 round-trip would corrupt the low digits
+// (e.g. yield ...400192 instead of ...400000).
+#[test]
+fn round_int_ndigits_large_exact() {
+    assert_eq!(
+        eval("round(4611686018427387904, -5)").to_display_string(),
+        "4611686018427400000"
+    );
+    assert_eq!(
+        eval("round(-9223372036854775808, -7)").to_display_string(),
+        "-9223372036850000000"
+    );
+}
+
+// round(float, ndigits) return type follows the spec (RFC 0006): int when
+// ndigits <= 0, float when ndigits > 0.
+#[test]
+fn round_float_ndigits_return_type() {
+    assert!(matches!(eval("round(2.5, 0)"), ExprValue::Int(2)));
+    assert!(matches!(eval("round(1.5, -1)"), ExprValue::Int(_)));
+    assert!(matches!(eval("round(1.5, 2)"), ExprValue::Float(_)));
+}
+
+// Positive ndigits preserves trailing zeros in the display (RFC 0006), even for
+// a zero value: round(0.0, 7) -> "0.0000000".
+#[test]
+fn round_float_positive_ndigits_trailing_zeros() {
+    assert_eq!(eval("round(3.5, 2)").to_display_string(), "3.50");
+    assert_eq!(eval("round(0.0, 7)").to_display_string(), "0.0000000");
 }
 
 // === TestFloorCeilReturnType ===
@@ -683,11 +785,11 @@ fn round_ndigits_neg_0_75() {
 }
 #[test]
 fn round_ndigits_neg_2_5_0() {
-    assert_eq!(eval("round(-2.5, 0)").to_display_string(), "-2.0");
+    assert_eq!(eval("round(-2.5, 0)").to_display_string(), "-2");
 }
 #[test]
 fn round_ndigits_neg_3_5_0() {
-    assert_eq!(eval("round(-3.5, 0)").to_display_string(), "-4.0");
+    assert_eq!(eval("round(-3.5, 0)").to_display_string(), "-4");
 }
 
 // TestFailFunction - missing cases

@@ -413,13 +413,18 @@ documents. None affect spec compliance.
 
 ### Behavioral differences
 
-None observed. The probes (§7) covering chained comparisons, bool/null
-falsiness, list equality with range_expr, cross-type
-String↔Path equality, and Unicode subscript all match Python
-semantics where the spec defines them. The Rust crate's `RangeExpr`
-canonicalizes descending ranges to ascending form at construction
-time, which `range-expr.md` calls out as a deliberate simplification
-over Python.
+~~None observed.~~ **Superseded 2026-07-24** — the hand-written probes
+missed a class of *silent-value* divergences that a systematic differential
+harness (running `openjd-expr` against the Python reference on generated
+inputs) later surfaced. See **§7 Bugs found** for the list; all are fixed. The
+original probes remain accurate for the categories they covered (chained
+comparisons, bool/null falsiness, list equality with range_expr, Unicode
+subscript); the gap was breadth, not correctness of those specific probes. Note
+in particular that the earlier "cross-type String↔Path equality matches Python"
+observation did **not** extend to String↔Path *ordering* comparison, which was
+one of the bugs found. The Rust crate's `RangeExpr` canonicalizes descending
+ranges to ascending form at construction time, which `range-expr.md` calls out
+as a deliberate simplification over Python.
 
 ### Test parity
 
@@ -531,11 +536,41 @@ correctly (a probe author mistake, not a crate defect).
 
 ### Bugs found
 
-**None.** Every probe behaved as the spec or `evaluator.md` predicted.
-The probes were written specifically to look for edge-case crashes,
-panics, silent overflow, hashing-equality consistency violations,
-Unicode issues, and surprises in resource-bounding paths. None of
-those happened.
+~~**None.**~~ **Updated 2026-07-24.** The one-shot probes found none. A
+follow-up *differential* pass — running `openjd-expr` and the Python reference
+against the same inputs (a shared conformance corpus plus a grammar-aware
+generator biased toward `i64` edges, negative counts, and multibyte strings) —
+found **15** divergences, all in the silent-wrong-value / wrong-type class that
+crash-only probing does not catch. **All are now fixed** (see the
+`fix(expr): align … with the spec/Python reference` change), each with a
+concrete regression test.
+
+| # | Area | Divergence (Rust → correct) | Root cause |
+|---|------|-----------------------------|------------|
+| 1 | `round(float, n)` return type | float → **int** for `n ≤ 0` | didn't follow RFC 0006 return-type rule |
+| 2 | `round(int, -k)` | precision loss on large ints | f64 round-trip instead of exact integer arithmetic |
+| 3 | `round(float, n>0)` | dropped trailing zeros (`round(0.0,7)`) | zero-string discarded in `Float64::with_str` |
+| 4 | float `%` | `9.2e18 % 0.1` → `0.0` | `l - r*floor(l/r)` cancellation; now fmod-based |
+| 5 | float `//` | `205 // 0.1` → `2050` (should be `2049`) | `(l/r).floor()` instead of CPython `float_divmod` |
+| 6 | float `//` overflow | saturated instead of erroring | `> i64::MAX as f64` let exactly 2^63 through |
+| 7 | `floor`/`ceil`/`round` → i64 | same 2^63 boundary saturation | as above |
+| 8 | `int ** -n` | last-ulp error | `powi` (repeated squaring) instead of `powf` |
+| 9 | `float(x)` | reformatted literal (`1e308`→`1e+308`) | identity dropped the preserved literal |
+| 10 | `format_float` | `e18`/`e-7` vs `e+18`/`e-07` | non-C-style exponent formatting |
+| 11 | `center`/`ljust`/`rjust` | negative width wrapped `usize` | `-1 as usize`; now clamps to 0 |
+| 12 | `center` odd padding | wrong bias | didn't match CPython `marg & width & 1` |
+| 13 | `path / ''` | trailing separator | empty component not treated as no-op |
+| 14 | Windows `path` join | kept left on root-relative right | didn't match `ntpath.join` |
+| 15 | String↔Path `<` | wrong boolean | operands swapped in the comparison arm |
+
+Most are spec-confirmed against RFC 0005/0006; a few (float `//`/`%`
+tie-breaking, exponent spelling, negative-width padding) are spec-silent edge
+cases where the Python reference is the de-facto definition — reasonable
+readings, flagged in code comments and worth raising as spec clarifications.
+
+The differential harness itself is a developer tool with an out-of-tree Python
+dependency, kept on a branch rather than in the crate; the durable output is the
+fixes above plus their unit tests.
 
 ### Probe file
 

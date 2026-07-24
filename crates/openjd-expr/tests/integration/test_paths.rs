@@ -1438,7 +1438,9 @@ fn join_posix_trailing_backslash_not_stripped() {
 
 #[test]
 fn join_posix_empty_right() {
-    assert_eq!(path_join("/a/b", "", PathFormat::Posix), "/a/b/");
+    // Joining an empty component is a no-op, matching Python `PurePath / ""`
+    // (which returns the path unchanged — no trailing separator).
+    assert_eq!(path_join("/a/b", "", PathFormat::Posix), "/a/b");
 }
 
 #[test]
@@ -1447,6 +1449,15 @@ fn join_posix_root() {
 }
 
 // --- Windows format ---
+
+// A root-relative right (leading separator) with a left that has NO drive and
+// NO UNC root replaces the left entirely, matching ntpath.join('a/b', '/x') ==
+// '/x'. The previous code kept the left, producing e.g. "a\\b\\x".
+#[test]
+fn join_windows_root_relative_no_drive_replaces() {
+    assert_eq!(path_join("a\\b", "/x", PathFormat::Windows), "\\x");
+    assert_eq!(path_join("relative", "\\foo", PathFormat::Windows), "\\foo");
+}
 
 #[test]
 fn join_windows_basic() {
