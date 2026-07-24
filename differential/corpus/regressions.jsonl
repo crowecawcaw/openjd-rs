@@ -1,0 +1,64 @@
+{"expr": "2 ** 63"}
+{"expr": "2.0 ** 63"}
+{"expr": "2 ** 63 == 2.0 ** 63"}
+{"expr": "'12.5'"}
+{"expr": "center('a', -1)"}
+{"expr": "center('a', 5)"}
+{"expr": "round(1.5, -9223372036854775808)"}
+{"expr": "'abc' * 4611686018427387904"}
+{"expr": "-9.2e18 - 9.2e18"}
+{"expr": "9223372036854775807 + 1"}
+{"expr": "-9223372036854775808 - 1"}
+{"expr": "-(-9223372036854775808)"}
+{"expr": "abs(-9223372036854775808)"}
+{"expr": "path('日')", "path_format": "WINDOWS"}
+{"expr": "path('日/本').name", "path_format": "WINDOWS"}
+{"expr": "9223372036854775807 * 2"}
+{"expr": "round(0.0, 7)"}
+{"expr": "round(-0.0, 7)"}
+{"expr": "round(-0.001, 2)"}
+{"expr": "round(0.0, 2)"}
+{"expr": "round(1.5, 1)"}
+{"expr": "round(15.0, -1)"}
+{"expr": "round(1234, -2)"}
+{"expr": "round(5, -1)"}
+{"expr": "center('ab', 11)"}
+{"expr": "center('ab', 10)"}
+{"expr": "center('a', 5)"}
+{"expr": "ljust('a', -1)"}
+{"expr": "rjust('a', -1)"}
+{"expr": "'ab' * 9223372036854775807"}
+{"expr": "null"}
+{"expr": "9223372036854775807 % 0.1"}
+{"expr": "-5.5 % 2.0"}
+{"expr": "5.5 % -2.0"}
+{"expr": "path('/tmp/x') < 'ab'"}
+{"expr": "path('/a') < path('/b')"}
+{"expr": "'ab' < path('/tmp/x')"}
+{"expr": "round(1e308, 3)"}
+{"expr": "round(-1e308, 5)"}
+{"expr": "int(0.5)"}
+{"expr": "int(0.0)"}
+{"expr": "int((-((--1e308) % int(9.2e18))))"}
+{"expr": "float(1e308)"}
+{"expr": "float(9.2e18)"}
+{"expr": "round(15, -1)"}
+{"expr": "round(25, -1)"}
+{"expr": "round(35, -1)"}
+{"expr": "round(250, -2)"}
+{"expr": "round(-25, -1)"}
+{"expr": "round(4611686018427387904, -5)"}
+{"expr": "round(-9223372036854775808, -7)"}
+{"expr": "round((235 + 4611686018427387904), -1)"}
+{"expr": "205 // 0.1"}
+{"expr": "abs(-9.2e18) // -568"}
+{"expr": "7.0 // 2.0"}
+{"expr": "-7.0 // 2.0"}
+{"expr": "895.5 // -9.2e18"}
+{"expr": "9.223372036854776e18 // 1"}
+{"expr": "floor((-float((-9223372036854775807))))"}
+{"expr": "1e308"}
+{"expr": "1e-5"}
+{"expr": "5e-8"}
+{"expr": "path('日/本') / path('/tmp/x')", "path_format": "WINDOWS"}
+{"expr": "path('日/本') / path('/tmp/x')", "path_format": "POSIX"}

@@ -61,7 +61,12 @@ pub fn int_from_string(_: Ctx, a: &[ExprValue]) -> R {
 
 pub fn float_from_float(_: Ctx, a: &[ExprValue]) -> R {
     match &a[0] {
-        ExprValue::Float(f) => Ok(ExprValue::Float(Float64::new(f.value())?)),
+        // Identity — return the value *unchanged*, preserving any original
+        // literal string. Rebuilding via `Float64::new` would drop the
+        // preserved source text, reformatting e.g. `float(1e308)` from the
+        // literal `1e308` to the computed form `1e+308` and diverging from
+        // Python's `_float_identity` (which returns the value as-is).
+        ExprValue::Float(f) => Ok(ExprValue::Float(f.clone())),
         _ => Err(ExpressionError::type_error("type error")),
     }
 }

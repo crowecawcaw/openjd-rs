@@ -161,7 +161,14 @@ impl Float64 {
         }
         Ok(Self {
             value: v,
-            original: if v == 0.0 && s != "0.0" {
+            // For a zero value, drop only a *negative*-zero string (e.g. the
+            // "-0.00" that `round(-0.001, 2)` formats) so it normalizes to the
+            // canonical "0.0" — matching Python, which collapses signed zero.
+            // A non-negative zero string is preserved verbatim, so legitimate
+            // trailing zeros like `round(0.0, 7)` → "0.0000000" survive rather
+            // than being flattened to "0.0". Previously any zero whose string
+            // wasn't exactly "0.0" was discarded, which dropped those too.
+            original: if v == 0.0 && s.starts_with('-') {
                 None
             } else {
                 Some(s.into_boxed_str())
@@ -1308,8 +1315,14 @@ impl ExprValue {
             (Self::Bool(a), Self::Bool(b)) => Ok(a.cmp(b)),
             (Self::String(a), Self::String(b)) => Ok(a.cmp(b)),
             (Self::Path { value: a, .. }, Self::Path { value: b, .. }) => Ok(a.cmp(b)),
-            (Self::String(a), Self::Path { value: b, .. })
-            | (Self::Path { value: b, .. }, Self::String(a)) => Ok(a.cmp(b)),
+            // Mixed string/path compares by string value — but the operand
+            // order must be preserved. The previous combined arm bound the
+            // string to `a` and the path to `b` in *both* directions, silently
+            // swapping the operands when the path was on the left (so
+            // `path('/tmp/x') < 'ab'` compared `'ab'` against `'/tmp/x'` and
+            // returned the wrong result). Keep left-vs-right straight.
+            (Self::String(a), Self::Path { value: b, .. }) => Ok(a.cmp(b)),
+            (Self::Path { value: a, .. }, Self::String(b)) => Ok(a.cmp(b)),
             _ if self.is_list() && other.is_list() => {
                 let (a_iter, b_iter) = match (self.list_iter(), other.list_iter()) {
                     (Some(a), Some(b)) => (a, b),
@@ -1423,12 +1436,25 @@ pub fn format_float(f: f64) -> String {
     }
     let abs = f.abs();
     if !(1e-4..1e16).contains(&abs) {
-        format!("{:e}", f)
-            .replace("e-0", "e-")
-            .replace("e0", "e+0")
-            .replace("e", "e+")
-            .replace("e+-", "e-")
-            .replace("e++", "e+")
+        // Scientific notation, matching Python/C repr: a shortest-round-trip
+        // mantissa and an exponent written as `e` + sign + at least two digits
+        // (`1e+308`, `9.151416593531595e-07`). Rust's `{:e}` gives the right
+        // shortest mantissa but a sign-less, un-padded exponent (`1e308`,
+        // `...e-7`), so reformat the exponent explicitly. The previous
+        // chained `.replace(...)` approach mangled single-digit exponents
+        // (leaving `e-7`/`e18`), which diverged from the Python reference.
+        let sci = format!("{f:e}"); // e.g. "-9.151416593531595e-7"
+        match sci.split_once('e') {
+            Some((mantissa, exp)) => {
+                let exp: i32 = exp.parse().unwrap_or(0);
+                format!(
+                    "{mantissa}e{}{:02}",
+                    if exp < 0 { '-' } else { '+' },
+                    exp.abs()
+                )
+            }
+            None => sci,
+        }
     } else if f.fract() == 0.0 {
         format!("{}.0", f as i64)
     } else {

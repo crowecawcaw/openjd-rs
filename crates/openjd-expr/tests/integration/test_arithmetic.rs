@@ -361,32 +361,44 @@ fn round_ndigits_0_75() {
 }
 #[test]
 fn round_ndigits_2_5_0() {
-    assert_eq!(eval("round(2.5, 0)").to_display_string(), "2.0");
+    // round(float, 0) returns an INT, matching Python (banker's rounding).
+    assert_eq!(eval("round(2.5, 0)").to_display_string(), "2");
+    assert_eq!(
+        eval("round(2.5, 0)").expr_type(),
+        openjd_expr::ExprType::INT
+    );
 }
 #[test]
 fn round_ndigits_3_5_0() {
-    assert_eq!(eval("round(3.5, 0)").to_display_string(), "4.0");
+    assert_eq!(eval("round(3.5, 0)").to_display_string(), "4");
 }
 
 #[test]
-fn round_ndigits_zero_large_float_preserves_display() {
-    assert_eq!(
-        eval("string(round(1e300, 0))").to_display_string(),
-        "1e+300"
+fn round_ndigits_zero_large_float_overflows() {
+    // `round(float, 0)` returns an *int*, matching Python. 1e300 is finite as
+    // a float but rounds to a value far outside i64, so both sides error.
+    assert!(
+        ParsedExpression::new("round(1e300, 0)")
+            .and_then(|p| p.evaluate(&SymbolTable::new()))
+            .is_err(),
+        "round(1e300, 0) must overflow (result is outside i64), matching Python"
     );
-    assert_eq!(
-        eval("string(round(-1e300, 0))").to_display_string(),
-        "-1e+300"
-    );
+    assert!(ParsedExpression::new("round(-1e300, 0)")
+        .and_then(|p| p.evaluate(&SymbolTable::new()))
+        .is_err());
 }
 
 #[test]
-fn round_ndigits_zero_matches_display_threshold() {
-    // Float display switches to scientific notation at 1e16.
-    assert_eq!(eval("string(round(1e17, 0))").to_display_string(), "1e+17");
+fn round_ndigits_zero_returns_int() {
+    // `round(float, 0)` returns an *int*, matching Python (which then renders
+    // 1e17 without scientific notation in its string form).
+    assert_eq!(
+        eval("string(round(1e17, 0))").to_display_string(),
+        "100000000000000000"
+    );
     assert_eq!(
         eval("string(round(9e15, 0))").to_display_string(),
-        "9000000000000000.0"
+        "9000000000000000"
     );
 }
 
@@ -705,11 +717,11 @@ fn round_ndigits_neg_0_75() {
 }
 #[test]
 fn round_ndigits_neg_2_5_0() {
-    assert_eq!(eval("round(-2.5, 0)").to_display_string(), "-2.0");
+    assert_eq!(eval("round(-2.5, 0)").to_display_string(), "-2");
 }
 #[test]
 fn round_ndigits_neg_3_5_0() {
-    assert_eq!(eval("round(-3.5, 0)").to_display_string(), "-4.0");
+    assert_eq!(eval("round(-3.5, 0)").to_display_string(), "-4");
 }
 
 // TestFailFunction - missing cases

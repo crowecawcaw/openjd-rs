@@ -1,0 +1,197 @@
+name: Differential
+
+# Differential-test the Rust expression engine against the Python OpenJD
+# reference implementation on every pull request and on merges to main. The
+# harness runs each input through both implementations and asserts they agree
+# (equal typed value, or both error) — catching the silent-wrong-value class of
+# bug that neither the fuzzer (which only checks "does not crash") nor a human
+# reading the code reliably finds.
+#
+# Two gates run here:
+#   * conformance + regressions — deterministic corpora (fast; the real gate)
+#   * generative — a grammar-aware generator, time-/count-boxed so it covers
+#     broadly without slowing the merge queue (see DIFF_GEN_CASES below)
+#
+# The differential crate (differential/) is deliberately outside the root
+# workspace and depends on an out-of-tree Python checkout, so it lives in its
+# own workflow rather than the stable CI matrix.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, release, "patch_*"]
+  schedule:
+    # Nightly deeper multi-seed sweep (03:17 UTC — off the hour to avoid the
+    # cron stampede). Only the `differential-nightly` job runs on this trigger.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: differential-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  RUST_BACKTRACE: 1
+  # A missing/broken Python reference is a HARD failure in CI (never a silent
+  # skip): the whole point of this job is to run the oracle.
+  OPENJD_DIFF_REQUIRED: "1"
+  # Where the generative gate looks for the Rust reference-checkout convention
+  # is overridden explicitly below via OPENJD_PYTHON_REF_SRC.
+  # Per-PR generative budget: enough cases to exercise the evaluator broadly
+  # while keeping the step near ~20s including the one-time build. The generator
+  # runs ~6000 cases/sec once built, so this is generous headroom. A deeper
+  # multi-seed sweep is left to the nightly job below.
+  DIFF_GEN_CASES: "20000"
+
+jobs:
+  differential:
+    name: Differential (expr vs Python reference)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out openjd-rs
+        uses: actions/checkout@v6
+        with:
+          path: openjd-rs
+
+      # The Python reference lives in the mwiebe fork on the `expr` branch (the
+      # same checkout the eval-crate skill uses). Pin it beside the Rust repo so
+      # the harness's default side-by-side resolution would also work; we set
+      # OPENJD_PYTHON_REF_SRC explicitly regardless.
+      - name: Check out Python reference (openjd-model-for-python @ expr)
+        uses: actions/checkout@v6
+        with:
+          repository: mwiebe/openjd-model-for-python
+          ref: expr
+          path: openjd-model-for-python
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The reference is a pure-Python namespace package; importing it only
+      # needs its `src/` on PYTHONPATH (the harness sets this per-process). No
+      # pip install required for the expr module, but install its runtime deps
+      # in case the imported modules pull them in.
+      - name: Install Python reference dependencies
+        working-directory: openjd-model-for-python
+        run: |
+          python -m pip install --upgrade pip
+          # Editable install wires up the package + its deps; falls back to a
+          # no-op-safe requirements install if the project layout changes.
+          pip install -e . || pip install -r requirements-development.txt || true
+
+      - name: Sanity-check the reference imports
+        working-directory: openjd-model-for-python
+        run: PYTHONPATH=src python -c "from openjd.expr._eval import evaluate_expression as e; print(e('1+2').to_string())"
+
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup override set stable --path openjd-rs
+
+      - name: Compute rustc hash
+        id: rustc
+        run: echo "hash=$(rustc --version --verbose | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cargo cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            openjd-rs/differential/target
+          key: differential-${{ steps.rustc.outputs.hash }}-${{ hashFiles('openjd-rs/differential/Cargo.lock', 'openjd-rs/differential/Cargo.toml') }}
+          restore-keys: |
+            differential-${{ steps.rustc.outputs.hash }}-
+            differential-
+
+      # Point the harness at the checked-out reference's src/ directory.
+      - name: Set reference source path
+        run: echo "OPENJD_PYTHON_REF_SRC=${{ github.workspace }}/openjd-model-for-python/src" >> "$GITHUB_ENV"
+
+      # Gate 1 — deterministic corpora. Fast; this is the real per-PR gate. Any
+      # unallowed divergence between Rust and Python fails the build.
+      - name: Conformance + regression differential
+        working-directory: openjd-rs/differential
+        run: cargo test --test differential conformance_and_regressions -- --nocapture
+
+      # Gate 2 — grammar-aware generative differential, count-boxed via
+      # DIFF_GEN_CASES so it covers broadly in a single ~20s step. Uses the
+      # crate's fixed default seed for reproducibility; a divergence prints a
+      # ready-to-freeze corpus line and writes reproducers to target/ (uploaded
+      # below).
+      - name: Generative differential
+        working-directory: openjd-rs/differential
+        env:
+          OPENJD_DIFF_GEN_CASES: ${{ env.DIFF_GEN_CASES }}
+        run: cargo test --test differential generative_differential -- --nocapture
+
+      - name: Upload generative divergence reproducers
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: differential-divergences
+          path: openjd-rs/differential/target/generative-divergences*.txt
+          if-no-files-found: ignore
+
+  # Deeper multi-seed sweep, on a schedule rather than per-PR. Widens coverage
+  # by fanning the generator across many seeds; feeds new divergences back into
+  # differential/corpus/regressions.jsonl. Not a merge gate.
+  differential-nightly:
+    name: Differential nightly sweep
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out openjd-rs
+        uses: actions/checkout@v6
+        with:
+          path: openjd-rs
+      - name: Check out Python reference (openjd-model-for-python @ expr)
+        uses: actions/checkout@v6
+        with:
+          repository: mwiebe/openjd-model-for-python
+          ref: expr
+          path: openjd-model-for-python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python reference dependencies
+        working-directory: openjd-model-for-python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . || pip install -r requirements-development.txt || true
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup override set stable --path openjd-rs
+      - name: Set reference source path
+        run: echo "OPENJD_PYTHON_REF_SRC=${{ github.workspace }}/openjd-model-for-python/src" >> "$GITHUB_ENV"
+      - name: Multi-seed generative sweep
+        working-directory: openjd-rs/differential
+        run: |
+          set -euo pipefail
+          fail=0
+          for seed in 1 2 3 42 100 777 2024 12345 55555 99999 314159 271828; do
+            echo "::group::seed=$seed"
+            OPENJD_DIFF_GEN_SEED=$seed OPENJD_DIFF_GEN_CASES=25000 \
+              cargo test --test differential generative_differential -- --nocapture || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+      - name: Upload generative divergence reproducers
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: differential-divergences-nightly
+          path: openjd-rs/differential/target/generative-divergences*.txt
+          if-no-files-found: ignore

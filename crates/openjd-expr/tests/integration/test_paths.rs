@@ -1457,7 +1457,9 @@ fn join_posix_trailing_backslash_not_stripped() {
 
 #[test]
 fn join_posix_empty_right() {
-    assert_eq!(path_join("/a/b", "", PathFormat::Posix), "/a/b/");
+    // Joining an empty component is a no-op, matching Python `PurePath / ""`
+    // (which returns the path unchanged — no trailing separator).
+    assert_eq!(path_join("/a/b", "", PathFormat::Posix), "/a/b");
 }
 
 #[test]

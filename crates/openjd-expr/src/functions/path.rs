@@ -429,6 +429,12 @@ pub fn join(left: &str, right: &str, fmt: PathFormat) -> String {
     if is_absolute(right, fmt) {
         return right.to_string();
     }
+    // Joining an empty component is a no-op (Python `PurePath / ""` returns the
+    // path unchanged). Returning early avoids appending a bare trailing
+    // separator — `path('a') / ''` must be `"a"`, not `"a/"`.
+    if right.is_empty() {
+        return left.to_string();
+    }
     // Windows root-relative: /foo or \foo (but not \\server) replaces the path
     // but keeps the root from left. Matches ntpath.join behavior.
     // For drive paths (C:\...), the root is "C:".
@@ -445,6 +451,12 @@ pub fn join(left: &str, right: &str, fmt: PathFormat) -> String {
             if let Some(unc_root) = extract_unc_root(left) {
                 return format!("{unc_root}{right}");
             }
+            // Left has no drive and no UNC root: a root-relative right replaces
+            // the left entirely (matching ntpath.join('a/b', '/x') == '/x').
+            // Falling through to the normal join would wrongly keep the left
+            // (producing e.g. `日\本\tmp\x` instead of `\tmp\x`). Normalize the
+            // right's separators to the Windows form on the way out.
+            return crate::value::normalize_path_separators(right, fmt);
         }
     }
     let left_is_uri = crate::uri_path::is_uri(left);

@@ -1,0 +1,40 @@
+{"expr": "1 + 2"}
+{"expr": "2 - 3"}
+{"expr": "6 * 7"}
+{"expr": "7 / 2"}
+{"expr": "7 // 2"}
+{"expr": "7 % 3"}
+{"expr": "2 ** 10"}
+{"expr": "-5"}
+{"expr": "abs(-9)"}
+{"expr": "min(3, 8)"}
+{"expr": "max(3, 8)"}
+{"expr": "round(1.5, 0)"}
+{"expr": "round(2.5, 0)"}
+{"expr": "floor(1.9)"}
+{"expr": "ceil(1.1)"}
+{"expr": "int(3.9)"}
+{"expr": "float(3)"}
+{"expr": "1.0 + 2.0"}
+{"expr": "0.1 + 0.2"}
+{"expr": "true and false"}
+{"expr": "true or false"}
+{"expr": "not true"}
+{"expr": "1 < 2"}
+{"expr": "2 <= 2"}
+{"expr": "3 == 3"}
+{"expr": "3 != 4"}
+{"expr": "'a' + 'b'"}
+{"expr": "'ab' * 3"}
+{"expr": "len('hello')"}
+{"expr": "'Hello'.lower()"}
+{"expr": "'Hello'.upper()"}
+{"expr": "[1, 2, 3]"}
+{"expr": "[1, 2, 3] + [4, 5]"}
+{"expr": "len([1, 2, 3])"}
+{"expr": "path('/a/b/c.txt').name"}
+{"expr": "path('/a/b/c.txt').suffix"}
+{"expr": "path('/a/b/c.txt').parent"}
+{"expr": "N + 1", "symbols": {"N": 41}}
+{"expr": "Param.Count * 2", "symbols": {"Param.Count": 10}}
+{"expr": "S + '!'", "symbols": {"S": "hi"}}

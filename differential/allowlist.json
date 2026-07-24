@@ -1,0 +1,14 @@
+{
+  "_comment": "Intentional, reviewed divergences between openjd-expr (Rust) and the Python reference. A divergence is downgraded to a PASS only if its exact `input` is listed here, with a written `reason`. Adding an entry is a deliberate act reviewed in the PR that adds it. See src/allowlist.rs. Keep this list SHORT: prefer fixing the Rust side. Entries here fall into two documented KNOWN CLASSES that the generative sweep reproduces in many wrapped forms; the per-PR gate uses the fixed default seed (which these exact inputs cover), while the nightly multi-seed sweep is intentionally NON-gating precisely because it produces unbounded wrapped variants of these same two classes. If the nightly sweep ever surfaces a divergence that is NOT one of these two classes, it is a real bug to fix, not an allowlist addition.",
+  "known_classes": [
+    "float-literal-preservation: Rust preserves a float's original source literal through max/min/abs (rendering e.g. '9.2e18'), while the Python reference discards it and reformats the identical f64 value ('9.2e+18'). Same numeric value, different exponent spelling. Which policy is canonical is an open upstream design question.",
+    "round-neg-ndigits-double-rounding: round(float, -k) on a value near 2^63 can disagree with Python by one unit in the last place. Matching exactly would require reimplementing CPython's David-Gay/dtoa correctly-rounded decimal scaling; the magnitude of disagreement is 1 ulp at ~1e18."
+  ],
+  "allowed": [
+    {
+      "input": "max(9.2e18, 275)",
+      "reason": "float-literal-preservation class. Rust renders the preserved literal '9.2e18'; Python reformats to '9.2e+18'. Same f64 value.",
+      "reference": "openjd-rs expr literal-preservation policy (TODO: link tracking issue)"
+    }
+  ]
+}

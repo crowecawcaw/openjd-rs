@@ -107,8 +107,14 @@ pub fn pow_int(_: Ctx, a: &[ExprValue]) -> R {
                         "Cannot raise zero to a negative power",
                     ));
                 }
-                let exp32 = i32::try_from(*exp).unwrap_or(i32::MIN);
-                return Ok(ExprValue::Float(Float64::new((*base as f64).powi(exp32))?));
+                // Use `powf`, not `powi`: `powi` evaluates via repeated squaring
+                // and accumulates a last-ulp error (e.g. `956 ** -74` came out
+                // as ...9224e-221 instead of ...924e-221), whereas Python
+                // computes int-base/negative-exponent power in float and matches
+                // `powf` exactly.
+                return Ok(ExprValue::Float(Float64::new(
+                    (*base as f64).powf(*exp as f64),
+                )?));
             }
             // Guard: exponent > 63 with |base| > 1 always overflows i64
             if *exp > 63 && !matches!(*base, -1..=1) {
@@ -185,7 +191,33 @@ pub fn floordiv_float(_: Ctx, a: &[ExprValue]) -> R {
     if r == 0.0 {
         return Err(ExpressionError::division_by_zero("Division"));
     }
-    let v = (l / r).floor();
+    // Float floor-division is NOT `(l / r).floor()`: because the true quotient
+    // is only approximated in f64, plain flooring gives the wrong integer at
+    // ties (e.g. `205 // 0.1` → 2050 instead of Python's 2049, since 0.1 is
+    // slightly more than 1/10). Reproduce CPython's `float_divmod` exactly —
+    // derive the quotient from the `fmod` remainder, apply the floored-division
+    // sign correction, then round with CPython's `> 0.5` nudge.
+    let v = {
+        let modv = l % r; // fmod: remainder with the dividend's sign
+        let mut div = (l - modv) / r;
+        // Floored-division correction: when the remainder's sign disagrees with
+        // the divisor's, the true quotient is one less than the truncated one.
+        // (CPython also adjusts `mod` here, but floordiv only needs `div`.)
+        if modv != 0.0 && (r < 0.0) != (modv < 0.0) {
+            div -= 1.0;
+        }
+        if div != 0.0 {
+            let floordiv = div.floor();
+            if div - floordiv > 0.5 {
+                floordiv + 1.0
+            } else {
+                floordiv
+            }
+        } else {
+            // Sign of a zero quotient follows l/r; as an integer it is just 0.
+            0.0
+        }
+    };
     if !float_fits_i64(v) {
         return Err(ExpressionError::integer_overflow());
     }
@@ -197,8 +229,18 @@ pub fn mod_float(_: Ctx, a: &[ExprValue]) -> R {
     if r == 0.0 {
         return Err(ExpressionError::division_by_zero("Modulo"));
     }
-    // Python uses floored modulo: l - r * floor(l / r)
-    Ok(ExprValue::Float(Float64::new(l - r * (l / r).floor())?))
+    // Python's float `%` is floored (the result takes the *divisor's* sign),
+    // but computing it as `l - r * floor(l / r)` loses all precision when
+    // `|l/r|` is huge: `9.2e18 % 0.1` rounds `l/r` to ~9.2e19 and cancels to
+    // `0.0` instead of `2.84e-14`. Match CPython exactly: start from C `fmod`
+    // (`f64::rem`, which is truncated toward zero and numerically exact), then
+    // adjust by one divisor when the remainder's sign disagrees with the
+    // divisor's. See CPython `float___mod__`.
+    let mut m = l % r;
+    if m != 0.0 && (m < 0.0) != (r < 0.0) {
+        m += r;
+    }
+    Ok(ExprValue::Float(Float64::new(m)?))
 }
 
 pub fn pow_float(_: Ctx, a: &[ExprValue]) -> R {

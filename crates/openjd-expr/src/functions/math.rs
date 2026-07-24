@@ -143,109 +143,188 @@ pub fn ceil_int(_: Ctx, a: &[ExprValue]) -> R {
     }
 }
 
+/// Largest positive `ndigits` accepted by `round(x, ndigits)`. Python raises
+/// "precision too big" once `ndigits` exceeds the platform C `int` range
+/// (`i32::MAX`); we match that boundary exactly so the differential oracle
+/// agrees on the extreme inputs the generator produces (e.g. `i64::MAX`).
+const MAX_ROUND_NDIGITS: i64 = i32::MAX as i64;
+
+/// Threshold above which an `f64` has no fractional bits — rounding it to any
+/// number of decimal places is a no-op.
+const NO_FRACTION_ABOVE: f64 = 4_503_599_627_370_496.0; // 2^52
+
+/// Rust's format-precision panics past `u16::MAX`, and an f64's exact decimal
+/// expansion has at most 1074 fractional digits, so we format at most that many
+/// and zero-fill the rest.
+const MAX_F64_FRACTION_DIGITS: usize = 1074;
+
+/// Round `value` to the nearest multiple of `10^magnitude` (i.e. `round(value,
+/// -magnitude)`), robust to astronomically large `magnitude`.
+///
+/// `magnitude` can be as large as `i64::MIN.unsigned_abs()` when a caller passes
+/// `round(x, i64::MIN)`. Computing `10f64.powi(magnitude)` there overflows to
+/// infinity, and the naive `round(value / factor) * factor` then yields `NaN`.
+/// Python returns `0` in that regime (any finite value is nearer to `0` than to
+/// the first nonzero multiple of an enormous power of ten), so special-case a
+/// zero scaled result to `0.0` instead of `0 * inf`.
+fn round_to_neg_power(value: f64, magnitude: u64) -> f64 {
+    let factor = if magnitude > 308 {
+        f64::INFINITY
+    } else {
+        10f64.powi(magnitude as i32)
+    };
+    let scaled = round_half_even(value / factor);
+    if scaled == 0.0 {
+        0.0
+    } else {
+        scaled * factor
+    }
+}
+
+/// Convert a whole-valued `f64` to an `ExprValue::Int`, erroring on out-of-range
+/// input. Uses `float_fits_i64` for the exact 2^63 boundary check.
+fn float_to_int_checked(v: f64) -> R {
+    if !float_fits_i64(v) {
+        return Err(ExpressionError::integer_overflow());
+    }
+    Ok(ExprValue::Int(v as i64))
+}
+
 pub fn round_fn(ctx: Ctx, a: &[ExprValue]) -> R {
+    // Extract the optional `ndigits`. `None` (single-arg `round`) is distinct
+    // from `Some(0)` at the type level: both yield an int result here, but
+    // keeping the distinction mirrors the Python overloads.
+    let ndigits = match a.get(1) {
+        Some(ExprValue::Int(n)) => Some(*n),
+        Some(_) => return Err(ExpressionError::new("round() ndigits must be int")),
+        None => None,
+    };
     match &a[0] {
-        ExprValue::Float(f) => {
-            let has_ndigits = a.len() > 1;
-            let ndigits = a
-                .get(1)
-                .and_then(|v| match v {
-                    ExprValue::Int(n) => Some(*n),
-                    _ => None,
-                })
-                .unwrap_or(0);
-            if !has_ndigits {
-                let v = round_half_even(f.value());
-                if !float_fits_i64(v) {
-                    return Err(ExpressionError::integer_overflow());
+        ExprValue::Float(f) => match ndigits {
+            // No ndigits, or ndigits <= 0: Python returns an *int*.
+            None => float_to_int_checked(round_half_even(f.value())),
+            Some(n) if n <= 0 => {
+                // A float with |v| >= 2^52 is already integral, so rounding it
+                // to a negative power smaller than its magnitude is a no-op.
+                // Returning it directly also dodges the overshoot in
+                // `round_to_neg_power`'s `v/factor*factor` round-trip, which
+                // for values near 2^63 lands just past the i64 range and would
+                // spuriously overflow. (Rare 1-ulp double-rounding
+                // disagreements with Python remain at this magnitude — see
+                // the allowlist.) When 10^|n| exceeds the magnitude, the value
+                // is small enough that `round_to_neg_power` handles it and
+                // correctly yields 0.
+                let v = f.value();
+                if v.abs() >= NO_FRACTION_ABOVE {
+                    float_to_int_checked(v)
+                } else {
+                    float_to_int_checked(round_to_neg_power(v, n.unsigned_abs()))
                 }
-                Ok(ExprValue::Int(v as i64))
-            } else if ndigits >= 0 {
-                // The formatted output grows with ndigits; charge the
-                // budget before computing so a huge precision (e.g.
-                // round(1.5, 10**18)) trips the operation limit instead
-                // of attempting a matching allocation.
-                let requested = usize::try_from(ndigits).unwrap_or(usize::MAX);
+            }
+            // ndigits > 0: Python returns a *float*, formatted to that many
+            // decimal places.
+            Some(n) => {
+                if n > MAX_ROUND_NDIGITS {
+                    return Err(ExpressionError::new("round() precision too big"));
+                }
+                // Charge the string budget up front so a huge precision (e.g.
+                // `round(1.5, 10**18)`) trips the operation limit rather than
+                // attempting a matching allocation.
+                let requested = n as usize;
                 ctx.count_string_ops(requested)?;
-                let factor = 10f64.powi(ndigits.min(i32::MAX as i64) as i32);
-                // 10^ndigits overflows f64 beyond ~308 digits; rounding
-                // at that precision leaves any f64 unchanged.
-                let rounded = if factor.is_infinite() {
-                    f.value()
+                let n32 = n as i32;
+                // Any f64 with |v| >= 2^52 already has no fractional bits, so
+                // rounding it to n > 0 decimal places is a no-op — and the
+                // naive `v * 10^n / 10^n` round-trip would only inject error
+                // (e.g. -9.2e19 came back as ...16384 instead of ...00000).
+                // Likewise n >= 17 exceeds f64's decimal precision, and
+                // `v * 10^n` may overflow to infinity for large v.
+                let v = f.value();
+                let rounded = if n32 >= 17 || v.abs() >= NO_FRACTION_ABOVE {
+                    v
                 } else {
-                    round_half_even(f.value() * factor) / factor
-                };
-                if ndigits == 0 {
-                    // `rounded` is integral, so the default display
-                    // (`format_float`) already renders it canonically:
-                    // trailing `.0` in range, scientific notation outside.
-                    Ok(ExprValue::Float(Float64::new(rounded)?))
-                } else {
-                    // Rust's formatting machinery panics ("Formatting
-                    // argument out of range") for precision above
-                    // u16::MAX, and operation budgeting alone admits
-                    // precisions like 100,000. An f64's exact decimal
-                    // expansion has at most 1074 fractional digits, so
-                    // format at most that many and zero-fill the rest —
-                    // the digits past that point are always zero, so the
-                    // output is unchanged — with the full length checked
-                    // against the memory budget before allocation.
-                    const MAX_F64_FRACTION_DIGITS: usize = 1074;
-                    let prec = requested.min(MAX_F64_FRACTION_DIGITS);
-                    let mut text = format!("{:.prec$}", rounded, prec = prec);
-                    let pad = requested - prec;
-                    if pad > 0 {
-                        ctx.check_memory(text.len() + pad)?;
-                        text.reserve_exact(pad);
-                        for _ in 0..pad {
-                            text.push('0');
-                        }
+                    let scaled = v * 10f64.powi(n32);
+                    if scaled.is_finite() {
+                        round_half_even(scaled) / 10f64.powi(n32)
+                    } else {
+                        v
                     }
-                    Ok(ExprValue::Float(Float64::with_str(rounded, text)?))
+                };
+                // Rust's format-precision panics past u16::MAX; an f64 has at
+                // most 1074 exact fractional digits, so format up to that and
+                // zero-pad the rest (digits past 1074 are always zero, so the
+                // output is unchanged). Memory-check the padded length.
+                let prec = requested.min(MAX_F64_FRACTION_DIGITS);
+                let mut text = format!("{:.prec$}", rounded, prec = prec);
+                let pad = requested - prec;
+                if pad > 0 {
+                    ctx.check_memory(text.len() + pad)?;
+                    text.reserve_exact(pad);
+                    for _ in 0..pad {
+                        text.push('0');
+                    }
                 }
-            } else {
-                // ndigits < 0. round(v, n) is 0 whenever 10^|n| exceeds
-                // 2·|v|, and every finite f64 is below 10^309 / 2, so
-                // short-circuit — this also keeps the negation and powi
-                // below in range (ndigits can be i64::MIN, whose direct
-                // negation overflows).
-                if ndigits <= -309 {
-                    return Ok(ExprValue::Float(Float64::new(0.0)?));
-                }
-                let factor = 10f64.powi((-ndigits) as i32);
-                Ok(ExprValue::Float(Float64::new(
-                    round_half_even(f.value() / factor) * factor,
-                )?))
+                Ok(ExprValue::Float(Float64::with_str(rounded, text)?))
             }
-        }
-        ExprValue::Int(i) => {
-            let ndigits = a
-                .get(1)
-                .and_then(|v| match v {
-                    ExprValue::Int(n) => Some(*n),
-                    _ => None,
-                })
-                .unwrap_or(0);
-            if ndigits >= 0 {
-                Ok(ExprValue::Int(*i))
-            } else {
-                // 10^20 / 2 exceeds i64::MAX, so every i64 rounds to 0
-                // for ndigits <= -20. Short-circuiting also keeps the
-                // negation below from overflowing on extreme ndigits.
-                if ndigits <= -20 {
-                    return Ok(ExprValue::Int(0));
-                }
-                let factor = 10f64.powi((-ndigits) as i32);
-                let v = round_half_even(*i as f64 / factor) * factor;
-                if !float_fits_i64(v) {
-                    return Err(ExpressionError::integer_overflow());
-                }
-                Ok(ExprValue::Int(v as i64))
-            }
-        }
+        },
+        ExprValue::Int(i) => match ndigits {
+            // Non-negative ndigits on an int is a no-op (Python returns the int
+            // unchanged); a single-arg `round(int)` likewise returns it as-is.
+            None => Ok(ExprValue::Int(*i)),
+            Some(n) if n >= 0 => Ok(ExprValue::Int(*i)),
+            // Negative ndigits rounds an int to a multiple of 10^k. Done in
+            // *integer* arithmetic (not via f64) so large magnitudes keep full
+            // precision — `round(4611686018427387904, -5)` must yield
+            // `...400000`, not the `...400192` an f64 round-trip produces.
+            Some(n) => round_int_neg(*i, n.unsigned_abs()),
+        },
         _ => Err(ExpressionError::new("round() requires numeric argument")),
     }
 }
+
+/// Round integer `i` to the nearest multiple of `10^k`, ties to even (matching
+/// Python's `round(int, -k)`). Exact — no float round-trip. Returns an overflow
+/// error if the result leaves the `i64` range.
+fn round_int_neg(i: i64, k: u64) -> R {
+    // 10^k overflows i64 past k == 18; at that scale any i64 rounds to 0
+    // (its magnitude is below half of 10^19).
+    if k >= 19 {
+        return Ok(ExprValue::Int(0));
+    }
+    let pow = 10i64.pow(k as u32);
+    let rem = i.rem_euclid(pow); // in [0, pow); floored remainder
+    // Largest multiple of `pow` that is <= i (works for negatives). `i - rem`
+    // can underflow for i near i64::MIN, so use checked subtraction; on
+    // underflow the floor multiple is unrepresentable but the rounded-up value
+    // may still be, so fall through to the overflow-checked add below.
+    let down = i.checked_sub(rem);
+    let half = pow / 2;
+    // Decide whether to round up to `down + pow`, ties to even.
+    let round_up = match rem.cmp(&half) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        // Exact tie: round to the even multiple. `(i - rem) / pow` is the
+        // multiple index; round up iff it is odd. Derive it as `i / pow`
+        // rounded toward negative infinity, avoiding the unrepresentable
+        // `down` near i64::MIN.
+        std::cmp::Ordering::Equal => i.div_euclid(pow) % 2 != 0,
+    };
+    let result = if round_up {
+        // down + pow == i - rem + pow; compute without materializing `down`.
+        i.checked_sub(rem)
+            .and_then(|d| d.checked_add(pow))
+            .or_else(|| {
+                // `down` underflowed but `down + pow` may be fine: it equals
+                // `i + (pow - rem)`, and `pow - rem` is in (0, pow].
+                i.checked_add(pow - rem)
+            })
+            .ok_or_else(ExpressionError::integer_overflow)?
+    } else {
+        down.ok_or_else(ExpressionError::integer_overflow)?
+    };
+    Ok(ExprValue::Int(result))
+}
+
 
 pub fn sum_list(ctx: Ctx, a: &[ExprValue]) -> R {
     if let Some(iter) = a[0].list_iter() {
