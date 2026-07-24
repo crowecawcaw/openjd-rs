@@ -1918,6 +1918,12 @@ impl Session {
             uuid::Uuid::new_v4().simple()
         );
 
+        // The per-action cancel token registered above is a child of any
+        // `SessionConfig.cancel_token`; pass it to run_via_helper so an external
+        // token-only session cancel (which never fires the watch channel)
+        // still cancels this cross-user action.
+        let cancel_token = self.cancel.lock().token.clone().expect("set_action above");
+
         let config = crate::subprocess::SubprocessConfig {
             args: args.to_vec(),
             env_vars,
@@ -1941,6 +1947,7 @@ impl Session {
             &self.session_id,
             tx,
             self.cross_user.cancel_writer.as_ref(),
+            &cancel_token,
         )
         .await;
 

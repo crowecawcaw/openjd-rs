@@ -548,11 +548,58 @@ impl AsyncHelper for CrossUserHelperWin {
     }
 }
 
+/// Write a tokenized cancel command to the helper over `cancel_writer`.
+///
+/// Mirrors the framing that both the timeout path and `Session::cancel_action`
+/// write directly to the helper's stdin: a `TERMINATE` command for immediate
+/// cancels, or a `NOTIFY_THEN_TERMINATE` command carrying the grace period
+/// otherwise. The token alphabet excludes `"` and `\`, so no escaping is
+/// needed to embed it in a JSON literal.
+fn write_cancel_to_helper(
+    cancel_writer: &std::fs::File,
+    auth_token: &str,
+    cancel_method: &crate::runner::CancelMethod,
+) -> Result<(), SessionError> {
+    use std::io::Write;
+    let mut w = cancel_writer.try_clone().map_err(|e| {
+        SessionError::HelperCommunication(format!("Failed to clone cancel_writer: {e}"))
+    })?;
+    let notify_period = match cancel_method {
+        crate::runner::CancelMethod::NotifyThenTerminate { terminate_delay } => {
+            terminate_delay.as_secs()
+        }
+        crate::runner::CancelMethod::Terminate => 0,
+    };
+    if notify_period == 0 {
+        let _ = writeln!(w, r#"{{"token":"{auth_token}","cancel":"TERMINATE"}}"#);
+    } else {
+        let _ = writeln!(
+            w,
+            r#"{{"token":"{auth_token}","cancel":"NOTIFY_THEN_TERMINATE","notifyPeriodInSeconds":{notify_period}}}"#
+        );
+    }
+    let _ = w.flush();
+    Ok(())
+}
+
 /// Execute a subprocess via a CrossUserHelper, returning the result.
 ///
 /// This is async — the helper stdout is read via `AsyncHelperReader`, allowing
 /// `drive_action`'s select loop to process `ActionMessage`s (progress, status,
 /// env vars) concurrently while the helper runs.
+///
+/// Cancellation is observed over two channels, mirroring the same-user
+/// `run_subprocess` loop:
+///   * `cancel_token` — the per-action [`CancellationToken`], which an external
+///     caller can trip directly via `SessionConfig.cancel_token` (a token-only
+///     cancel that never touches the watch channel), and which
+///     `Session::cancel_action` also fires.
+///   * `config.cancel_request_rx` — the watch channel that `cancel_action`
+///     mirrors onto the helper's stdin.
+///
+/// A fire on either channel maps the final action state to `Canceled`.
+///
+/// [`CancellationToken`]: tokio_util::sync::CancellationToken
 pub(crate) async fn run_via_helper(
     helper: &mut dyn AsyncHelper,
     config: &crate::subprocess::SubprocessConfig,
@@ -560,6 +607,7 @@ pub(crate) async fn run_via_helper(
     session_id: &str,
     message_tx: tokio::sync::mpsc::UnboundedSender<ActionMessage>,
     cancel_writer: Option<&std::fs::File>,
+    cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<crate::subprocess::SubprocessResult, SessionError> {
     // Build the env map (only set values; unsets are excluded).
     let env: serde_json::Map<String, serde_json::Value> = config
@@ -605,6 +653,13 @@ pub(crate) async fn run_via_helper(
 
     let mut stdout_collected = String::new();
     let mut saw_fail = false;
+    // Whether a cancel command has already been written to the helper. The
+    // watch channel (fired by `Session::cancel_action`) also cancels the
+    // token, so without this guard a `cancel_action`-initiated cancel would
+    // deliver the cancel command twice (once via `cancel_action` writing to
+    // the cancel_writer directly, once from the token branch below). A second
+    // command is harmless to the helper protocol, but we avoid it when easy.
+    let mut cancel_sent = false;
 
     loop {
         tokio::select! {
@@ -657,10 +712,17 @@ pub(crate) async fn run_via_helper(
                         exit_code
                     );
 
-                    let canceled = config
-                        .cancel_request_rx
-                        .as_ref()
-                        .is_some_and(|rx| rx.has_changed().unwrap_or(false));
+                    // A cancel may arrive over either channel: the watch
+                    // channel (mirrored by `Session::cancel_action`) or the
+                    // `CancellationToken` (which an external caller can trip
+                    // directly via `SessionConfig.cancel_token`). Treat a fire
+                    // on either as a cancel — mirroring the sticky
+                    // `is_cancelled()` check in the same-user `run_subprocess`.
+                    let canceled = cancel_token.is_cancelled()
+                        || config
+                            .cancel_request_rx
+                            .as_ref()
+                            .is_some_and(|rx| rx.has_changed().unwrap_or(false));
 
                     let state = if canceled {
                         ActionState::Canceled
@@ -692,33 +754,23 @@ pub(crate) async fn run_via_helper(
                     resp
                 )));
             }
+            // External / per-action cancel via the CancellationToken. This is
+            // the channel a worker agent trips through `SessionConfig.cancel_token`
+            // and that `Session::cancel_action` also fires. Mirror the same-user
+            // loop's `cancel_token.cancelled()` branch: deliver the cancel to the
+            // helper over the cancel_writer so the child is actually stopped.
+            _ = cancel_token.cancelled(), if !cancel_sent => {
+                cancel_sent = true;
+                if let Some(writer) = cancel_writer {
+                    write_cancel_to_helper(writer, helper.auth_token(), &config.cancel_method)?;
+                }
+            }
             _ = &mut timeout_fut, if !timed_out => {
                 timed_out = true;
                 // Send cancel to helper via the cancel_writer
                 if let Some(writer) = cancel_writer {
-                    use std::io::Write;
-                    let mut w = writer.try_clone().map_err(|e| {
-                        SessionError::HelperCommunication(format!("Failed to clone cancel_writer: {e}"))
-                    })?;
-                    let token = helper.auth_token();
-                    let cancel_method = &config.cancel_method;
-                    let notify_period = match cancel_method {
-                        crate::runner::CancelMethod::NotifyThenTerminate { terminate_delay } => {
-                            terminate_delay.as_secs()
-                        }
-                        crate::runner::CancelMethod::Terminate => 0,
-                    };
-                    // The token alphabet excludes `"` and `\`, so no
-                    // escaping is needed to embed it in a JSON literal.
-                    if notify_period == 0 {
-                        let _ = writeln!(w, r#"{{"token":"{token}","cancel":"TERMINATE"}}"#);
-                    } else {
-                        let _ = writeln!(
-                            w,
-                            r#"{{"token":"{token}","cancel":"NOTIFY_THEN_TERMINATE","notifyPeriodInSeconds":{notify_period}}}"#
-                        );
-                    }
-                    let _ = w.flush();
+                    cancel_sent = true;
+                    write_cancel_to_helper(writer, helper.auth_token(), &config.cancel_method)?;
                 }
             }
         }
@@ -784,5 +836,196 @@ mod token_tests {
             Some("good"),
             "augment_with_token must not let the caller override the token",
         );
+    }
+}
+
+/// Tests that `run_via_helper` observes the per-action `CancellationToken`.
+///
+/// These exercise the cross-user cancel path without Docker/root by faking the
+/// helper: `ScriptedHelper` implements the `pub(crate)` `AsyncHelper` trait,
+/// feeding scripted stdout responses and recording the auth token, while a real
+/// OS pipe stands in for the `cancel_writer` so the test can read back exactly
+/// what `run_via_helper` wrote to the helper's stdin.
+#[cfg(unix)]
+#[cfg(test)]
+mod cancel_token_tests {
+    use super::*;
+    use tokio_util::sync::CancellationToken;
+
+    /// A scripted stdout reader that models a still-running child:
+    ///   * call 1 → a `pid` line
+    ///   * call 2 → never resolves (child running); the only way out of the
+    ///     loop iteration is the cancel/timeout branch, which drops this future
+    ///   * call 3+ → the `exited` response the helper emits once the child dies
+    ///
+    /// This ordering guarantees `run_via_helper` writes the cancel command to
+    /// the cancel_writer (call-2 future is pending when the token fires, so the
+    /// biased `select!` takes the cancel branch) *before* it observes `exited`
+    /// and computes the final state.
+    struct MockReader {
+        exit_code: i64,
+        calls: u32,
+    }
+
+    impl AsyncHelperReader for MockReader {
+        fn next_response(&mut self) -> NextResponseFuture<'_> {
+            self.calls += 1;
+            let call = self.calls;
+            let exit_code = self.exit_code;
+            Box::pin(async move {
+                match call {
+                    1 => Some(Ok(serde_json::json!({"pid": 4242}))),
+                    2 => std::future::pending().await,
+                    _ => Some(Ok(serde_json::json!({"exited": exit_code}))),
+                }
+            })
+        }
+    }
+
+    struct ScriptedHelper {
+        auth_token: String,
+        reader: MockReader,
+    }
+
+    impl AsyncHelper for ScriptedHelper {
+        fn async_reader(&mut self) -> &mut dyn AsyncHelperReader {
+            &mut self.reader
+        }
+        fn send_command(&mut self, _cmd: &serde_json::Value) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn auth_token(&self) -> &str {
+            &self.auth_token
+        }
+    }
+
+    fn base_config(
+        cancel_method: crate::runner::CancelMethod,
+    ) -> crate::subprocess::SubprocessConfig {
+        crate::subprocess::SubprocessConfig {
+            args: vec!["sleep".into(), "100".into()],
+            env_vars: std::collections::HashMap::new(),
+            working_dir: None,
+            timeout: None,
+            user: None,
+            cancel_method,
+            cancel_request_rx: None,
+            debug_collect_stdout: false,
+        }
+    }
+
+    /// The core regression test: a token-only external cancel (as delivered by
+    /// `SessionConfig.cancel_token`, which never touches the watch channel)
+    /// must (a) be written to the helper over the cancel_writer, and (b) map
+    /// the final action state to `Canceled` — not `Success` — even though the
+    /// child then reports exit code 0.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn token_cancel_writes_to_helper_and_maps_to_canceled() {
+        use std::os::unix::io::{FromRawFd, IntoRawFd};
+
+        // Real OS pipe: the write end is the cancel_writer; the read end lets
+        // the test observe exactly what run_via_helper wrote to the helper.
+        let (read_fd, write_fd) = nix::unistd::pipe().unwrap();
+        let cancel_writer = unsafe { std::fs::File::from_raw_fd(write_fd.into_raw_fd()) };
+        let mut read_end = unsafe { std::fs::File::from_raw_fd(read_fd.into_raw_fd()) };
+
+        let cancel_token = CancellationToken::new();
+        let mut helper = ScriptedHelper {
+            auth_token: "AUTHTOKENxxxxxxxxxxxxx".into(),
+            // Child reports success — the token is the ONLY cancel signal.
+            reader: MockReader {
+                exit_code: 0,
+                calls: 0,
+            },
+        };
+        let config = base_config(crate::runner::CancelMethod::Terminate);
+        let mut filter = crate::action_filter::ActionFilter::new("test", true, false);
+        let (msg_tx, _msg_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Fire the token shortly after the loop parks on the pending reader.
+        let token_for_task = cancel_token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            token_for_task.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_via_helper(
+                &mut helper,
+                &config,
+                &mut filter,
+                "test",
+                msg_tx,
+                Some(&cancel_writer),
+                &cancel_token,
+            ),
+        )
+        .await
+        .expect("run_via_helper should return after the token-driven cancel")
+        .expect("run_via_helper should not error");
+
+        // (b) A token-only cancel maps the final state to Canceled.
+        assert_eq!(
+            result.state,
+            ActionState::Canceled,
+            "a token-only external cancel must map the action state to Canceled, not {:?}",
+            result.state
+        );
+
+        // (a) The cancel command was written to the helper over cancel_writer.
+        // Drop our write-end handles so the read cannot block; the child in
+        // run_via_helper holds a clone it flushes and then drops on return.
+        drop(cancel_writer);
+        let mut buf = Vec::new();
+        read_end.read_to_end(&mut buf).unwrap();
+        let written = String::from_utf8(buf).unwrap();
+        let parsed: serde_json::Value = written
+            .lines()
+            .next()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .expect("run_via_helper must write a cancel command to the helper");
+        assert_eq!(parsed["cancel"].as_str(), Some("TERMINATE"));
+        assert_eq!(
+            parsed["token"].as_str(),
+            Some("AUTHTOKENxxxxxxxxxxxxx"),
+            "the cancel command must carry the helper's auth token",
+        );
+    }
+
+    /// The final-state computation itself: a fired token maps to Canceled even
+    /// with no cancel_writer present (mirrors the sticky `is_cancelled()` check
+    /// in the same-user `run_subprocess`). Complements the test above by
+    /// isolating the state mapping from the cancel-delivery side effect.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fired_token_maps_exit_zero_to_canceled_without_writer() {
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel(); // already cancelled before the child exits
+
+        let mut helper = ScriptedHelper {
+            auth_token: "AUTHTOKENxxxxxxxxxxxxx".into(),
+            // Skip the pid + pending calls: first response is `exited`.
+            reader: MockReader {
+                exit_code: 0,
+                calls: 2,
+            },
+        };
+        let config = base_config(crate::runner::CancelMethod::Terminate);
+        let mut filter = crate::action_filter::ActionFilter::new("test", true, false);
+        let (msg_tx, _msg_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let result = run_via_helper(
+            &mut helper,
+            &config,
+            &mut filter,
+            "test",
+            msg_tx,
+            None,
+            &cancel_token,
+        )
+        .await
+        .expect("run_via_helper should not error");
+
+        assert_eq!(result.state, ActionState::Canceled);
     }
 }
