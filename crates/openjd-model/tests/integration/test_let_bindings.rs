@@ -639,7 +639,10 @@ fn test_env_file_has_path_properties() {
 
 #[test]
 fn test_task_file_has_path_properties() {
-    // Task.File.* is PATH type, so .stem should work in script-level let bindings
+    // Task.File.* is PATH type and IS in scope for script-level let bindings:
+    // `filename` is a plain string (never an expression), so the runtime
+    // allocates embedded file paths — defining Task.File.* — before `let`
+    // evaluation, mirroring Env.File.* in environment scripts.
     let s = r#"{
         "specificationVersion": "jobtemplate-2023-09",
         "extensions": ["EXPR"],
@@ -958,9 +961,8 @@ fn test_script_let_chained_with_session_symbol() {
     decode_ok(s);
 }
 
-// Note: Python tests for EnvironmentTemplate let binding extension validation
-// are not ported because EnvironmentTemplate extension handling is not yet
-// implemented in the Rust decode_environment_template function.
+// EnvironmentTemplate let-binding extension validation is covered in
+// test_environment_template.rs (env_template_let_* tests).
 
 // === Step-level let bindings must NOT have host-context symbols or functions ===
 

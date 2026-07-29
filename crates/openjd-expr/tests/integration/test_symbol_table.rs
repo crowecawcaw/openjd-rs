@@ -673,6 +673,69 @@ fn round_trip_empty_list() {
     assert_eq!(v.list_len(), Some(0));
 }
 
+// ══════════════════════════════════════════════════════════════
+// Serialization determinism (issue #243)
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn serialize_emits_entries_in_sorted_path_order() {
+    // Insert in non-sorted order to make ordering by insertion visible.
+    let mut st = SymbolTable::new();
+    st.set("Task.Param.Frame", ExprValue::Int(7)).unwrap();
+    st.set("Param.B", ExprValue::Int(2)).unwrap();
+    st.set("Session.WorkingDirectory", ExprValue::from("/tmp"))
+        .unwrap();
+    st.set("Param.A", ExprValue::Int(1)).unwrap();
+    let json: serde_json::Value = serde_json::to_value(&st).unwrap();
+    let names: Vec<&str> = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e.get("name").unwrap().as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "Param.A",
+            "Param.B",
+            "Session.WorkingDirectory",
+            "Task.Param.Frame"
+        ]
+    );
+}
+
+#[test]
+fn serialize_is_byte_identical_across_instances() {
+    // Two independently-built tables with the same contents must produce
+    // identical bytes, regardless of HashMap iteration order or insertion
+    // order. This is what content-addressing of resolvedSymTab relies on.
+    let build = |reversed: bool| {
+        let mut pairs = vec![
+            ("Param.Frame", ExprValue::Int(42)),
+            ("Param.Name", ExprValue::from("shot_01")),
+            ("Session.HasPathMappingRules", ExprValue::from("false")),
+            ("Task.Param.Chunk", ExprValue::Int(3)),
+        ];
+        if reversed {
+            pairs.reverse();
+        }
+        SymbolTable::from_pairs(pairs).unwrap()
+    };
+    let a = serde_json::to_string(&build(false)).unwrap();
+    let b = serde_json::to_string(&build(true)).unwrap();
+    assert_eq!(a, b);
+}
+
+#[test]
+fn all_paths_returns_sorted_order() {
+    let mut st = SymbolTable::new();
+    st.set("Z", ExprValue::Int(1)).unwrap();
+    st.set("A.Y", ExprValue::Int(2)).unwrap();
+    st.set("A.X", ExprValue::Int(3)).unwrap();
+    st.set("M", ExprValue::Int(4)).unwrap();
+    assert_eq!(st.all_paths(""), vec!["A.X", "A.Y", "M", "Z"]);
+}
+
 // ── Refactor coverage: all_paths return value, from_pairs IntoIterator ──
 
 #[test]
@@ -814,4 +877,74 @@ fn in_process_set_not_capped() {
         st.set(&format!("k{i}"), ExprValue::Int(i as i64)).unwrap();
     }
     assert_eq!(st.all_paths("").len(), MAX_SYMBOL_TABLE_ENTRIES + 100);
+}
+
+// ══════════════════════════════════════════════════════════════
+// SerializedSymbolTable equality + hashing
+// ══════════════════════════════════════════════════════════════
+
+fn hash_of<T: std::hash::Hash>(v: &T) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    v.hash(&mut h);
+    h.finish()
+}
+
+#[test]
+fn serialized_symtab_eq_hash_insertion_order_independent() {
+    // SymbolTable serialization is canonical (sorted paths), so the same
+    // logical table built in different insertion orders must produce
+    // equal SerializedSymbolTables with equal hashes.
+    let mut a = SymbolTable::new();
+    a.set("Param.A", ExprValue::Int(1)).unwrap();
+    a.set("Param.B", ExprValue::String("x".into())).unwrap();
+    let mut b = SymbolTable::new();
+    b.set("Param.B", ExprValue::String("x".into())).unwrap();
+    b.set("Param.A", ExprValue::Int(1)).unwrap();
+
+    let sa = SerializedSymbolTable::from_symtab(&a);
+    let sb = SerializedSymbolTable::from_symtab(&b);
+    assert_eq!(sa, sb);
+    assert_eq!(hash_of(&sa), hash_of(&sb));
+}
+
+#[test]
+fn serialized_symtab_ne_different_values() {
+    let mut a = SymbolTable::new();
+    a.set("Param.A", ExprValue::Int(1)).unwrap();
+    let mut b = SymbolTable::new();
+    b.set("Param.A", ExprValue::Int(2)).unwrap();
+    assert_ne!(
+        SerializedSymbolTable::from_symtab(&a),
+        SerializedSymbolTable::from_symtab(&b)
+    );
+}
+
+#[test]
+fn serialized_symtab_eq_is_transport_level() {
+    // Transport format preserves the original float literal, so tables
+    // built from "1.0" vs "1.00" are transport-unequal even though the
+    // ExprValues compare equal.
+    let mut a = SymbolTable::new();
+    a.set(
+        "Param.F",
+        ExprValue::Float(Float64::with_str(1.0, "1.0".into()).unwrap()),
+    )
+    .unwrap();
+    let mut b = SymbolTable::new();
+    b.set(
+        "Param.F",
+        ExprValue::Float(Float64::with_str(1.0, "1.00".into()).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        a.get_value("Param.F"),
+        b.get_value("Param.F"),
+        "ExprValue equality ignores the preserved literal"
+    );
+    assert_ne!(
+        SerializedSymbolTable::from_symtab(&a),
+        SerializedSymbolTable::from_symtab(&b),
+        "transport equality preserves the original literal"
+    );
 }

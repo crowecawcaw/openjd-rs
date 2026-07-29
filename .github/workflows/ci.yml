@@ -27,7 +27,7 @@ jobs:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install rust nightly with rustfmt
         run: |
           rustup toolchain install nightly --profile minimal --component rustfmt
@@ -43,7 +43,7 @@ jobs:
     name: cargo-deny (licenses, advisories, bans, sources)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
       - name: Restore helper manifest
@@ -54,22 +54,18 @@ jobs:
         run: cargo deny check licenses bans sources
       - name: Run cargo deny check licenses, bans, sources (helper sub-crate)
         run: cargo deny --manifest-path crates/openjd-sessions/src/helper/Cargo.toml check licenses bans sources
-      # Advisories are scoped to the normal dependency graph (what we
-      # actually ship). Our only remaining legacy-TLS exposure
-      # (`rustls 0.21` / `rustls-webpki 0.101.x` via
-      # `aws-smithy-http-client`'s `legacy-rustls-ring`) is pulled in only
-      # by the `s3s-aws` dev-dependency used in S3 integration tests, not
-      # by any library consumer.
-      - name: Run cargo deny check advisories (workspace, exclude dev)
-        run: cargo deny check advisories --exclude-dev
-      - name: Run cargo deny check advisories (helper sub-crate, exclude dev)
-        run: cargo deny --manifest-path crates/openjd-sessions/src/helper/Cargo.toml check advisories --exclude-dev
+      # Advisories are checked across the full dependency graph, including
+      # dev-dependencies.
+      - name: Run cargo deny check advisories (workspace)
+        run: cargo deny check advisories
+      - name: Run cargo deny check advisories (helper sub-crate)
+        run: cargo deny --manifest-path crates/openjd-sessions/src/helper/Cargo.toml check advisories
 
   compliance:
     name: Compliance (copyright headers)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check copyright headers
         run: bash scripts/check_copyright_headers.sh
 
@@ -84,7 +80,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install rust stable with clippy
         shell: bash
         run: |
@@ -102,7 +98,7 @@ jobs:
         run: echo "hash=$(rustc --version --verbose | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
       - name: Restore cargo cache
         id: cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -220,7 +216,7 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install rust stable with clippy
         run: |
           rustup toolchain install stable --profile minimal --component clippy
@@ -232,7 +228,7 @@ jobs:
       # Restore-only: build-test(ubuntu) owns the cache write. Saving from
       # here too would race with that job on pushes to main.
       - name: Restore build-test cache (read-only)
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -273,12 +269,12 @@ jobs:
         if: runner.os != 'Windows'
         run: chmod +x bin/${{ matrix.binary }}
       - name: Checkout openjd-specifications
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: OpenJobDescription/openjd-specifications
           path: openjd-specifications
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@v9.0.0
       - name: Run conformance tests (Unix)
         if: runner.os != 'Windows'
         working-directory: openjd-specifications/conformance-tests
@@ -297,12 +293,12 @@ jobs:
     name: MSRV
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install MSRV toolchain
         run: |
-          rustup toolchain install 1.92 --profile minimal
-          rustup override set 1.92
-      - uses: actions/cache@v5
+          rustup toolchain install 1.94.1 --profile minimal
+          rustup override set 1.94.1
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -319,12 +315,12 @@ jobs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install rust stable
         run: |
           rustup toolchain install stable --profile minimal
           rustup override set stable
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -347,7 +343,7 @@ jobs:
       matrix:
         variant: [localuser, ldap]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run cross-user tests
         run: |
           if [ "${{ matrix.variant }}" = "ldap" ]; then
@@ -366,7 +362,7 @@ jobs:
     needs: build-test
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install rust stable
         shell: bash
         run: |
@@ -377,7 +373,7 @@ jobs:
         shell: bash
         run: echo "hash=$(rustc --version --verbose | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
       - name: Restore build-test cache (read-only)
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -427,18 +423,18 @@ jobs:
     name: openjd-for-js (WASM + JS tests)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install rust stable with wasm32 target
         shell: bash
         run: |
           rustup toolchain install stable --profile minimal
           rustup override set stable
           rustup target add wasm32-unknown-unknown
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/wasm-bindgen
@@ -446,7 +442,7 @@ jobs:
             target
           key: wasm-${{ hashFiles('Cargo.lock') }}
       - name: Install wasm-bindgen-cli
-        run: which wasm-bindgen || cargo install wasm-bindgen-cli --version 0.2.122
+        run: which wasm-bindgen || cargo install wasm-bindgen-cli --version 0.2.126
       - name: Install JS deps
         run: cd crates/openjd-for-js && npm install
       - name: Build WASM + generate JS bindings

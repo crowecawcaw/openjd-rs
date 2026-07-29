@@ -39,7 +39,6 @@ pub struct FunctionEntry {
 
 pub struct FunctionLibrary {
     functions: HashMap<String, Vec<FunctionEntry>>,
-    pub host_context_enabled: bool,
 }
 ```
 
@@ -49,11 +48,11 @@ config) can be registered alongside plain functions. `Arc` (rather than `Box`)
 keeps `FunctionLibrary` `Clone`, which many call sites rely on when cloning the
 default library to add host-context extensions.
 
-The `host_context_enabled` flag is a runtime marker used by callers (model-layer
-template validation) to discover whether host-only functions like
-`apply_path_mapping` are available on this library instance. It is set when
-`FunctionLibrary::for_profile` builds a library from an `ExprProfile` whose
-`host_context` is `HostContext::WithRules(...)` or `HostContext::Unresolved`.
+Whether host-only functions like `apply_path_mapping` are available on a
+library instance is determined by whether they are registered — check with
+`get_signatures("apply_path_mapping")`. `FunctionLibrary::for_profile`
+registers them when the profile's `host_context` is
+`HostContext::WithRules(...)` or `HostContext::Unresolved`.
 
 Function pointers and closures both work — `Arc<dyn Fn + Send + Sync>` is
 `Clone` and thread-safe, preserving `FunctionLibrary: Clone + Send + Sync`.
@@ -160,8 +159,17 @@ Operators are registered as dunder-named functions:
 | `>` | `__gt__` | `(T1, T2) -> bool` |
 | `>=` | `__ge__` | `(T1, T2) -> bool` |
 | `x[i]` | `__getitem__` | `(list[T1], int) -> T1`, `(string, int) -> string`, `(range_expr, int) -> int`, plus slice overloads |
-| `in` | `__contains__` | `(list[T1], T1) -> bool`, `(string, string) -> bool`, `(range_expr, int) -> bool` |
+| `in` | `__contains__` | `(list[T1], T2) -> bool`, `(string, string) -> bool`, `(range_expr, T1) -> bool` |
 | `not in` | `__not_contains__` | Same as `__contains__` |
+
+Containment item types are deliberately unconstrained (`T2`/`T1` rather than
+binding to the container's element type): membership is decided by value
+equality, matching Python, so `'1' in [1, 2, 3]` and `'a' in range_expr('1-3')`
+evaluate to `false` rather than failing type resolution, and `1.0 in
+range_expr('1-3')` is `true` (integral floats compare equal to ints). Note the
+trade-off: a template whose containment item type can never match the
+container's element type passes static validation and always evaluates false
+at job time.
 
 ## Property Access
 
@@ -297,7 +305,7 @@ let rules: Vec<PathMappingRule> = /* ... */;
 let profile = ExprProfile::current()
     .with_host_context(HostContext::with_rules(rules));
 let lib: Arc<FunctionLibrary> = FunctionLibrary::for_profile(&profile);
-assert!(lib.host_context_enabled);
+assert!(!lib.get_signatures("apply_path_mapping").is_empty());
 ```
 
 `HostContext::with_rules(Vec<PathMappingRule>)` takes ownership of the rules
@@ -315,7 +323,7 @@ host-context function signatures with stub implementations that return
 let profile = ExprProfile::current()
     .with_host_context(HostContext::Unresolved);
 let lib = FunctionLibrary::for_profile(&profile);
-assert!(lib.host_context_enabled);
+assert!(!lib.get_signatures("apply_path_mapping").is_empty());
 ```
 
 This allows the type checker to verify that calls to host-context functions

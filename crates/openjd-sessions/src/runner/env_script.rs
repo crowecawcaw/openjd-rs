@@ -25,7 +25,12 @@ use crate::session_user::SessionUser;
 use crate::subprocess::SubprocessResult;
 
 /// Default timeout for environment exit actions (5 minutes), matching Python's _ENV_EXIT_DEFAULT_TIMEOUT.
-const ENV_EXIT_DEFAULT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+///
+/// `pub(crate)` because the session's RFC 0008 wrap dispatch applies the
+/// same default to `onWrapEnvExit` (Template Schemas §5 timeout defaults
+/// table assigns the wrap-exit hook the same 300-second default as
+/// `onExit`, so sessions always tear down in bounded time).
+pub(crate) const ENV_EXIT_DEFAULT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 pub struct EnvironmentScriptRunner {
     base: ScriptRunnerBase,
@@ -159,6 +164,38 @@ impl EnvironmentScriptRunner {
 
     pub fn state(&self) -> ScriptRunnerState {
         self.base.state
+    }
+
+    /// Run an arbitrary pre-resolved `Action` against a caller-supplied
+    /// symbol table. This is the low-level entry point used by the
+    /// session's RFC 0008 wrap-hook dispatch, which chooses the action
+    /// (the outer environment's `onWrapEnvEnter` or `onWrapEnvExit`) and the
+    /// symbol table (seeded with `WrappedAction.*` / `WrappedEnv.*`) outside the runner.
+    ///
+    /// Unlike `enter` / `exit`, this method does NOT materialize any
+    /// embedded files or evaluate let bindings — the caller is
+    /// responsible for preparing the symbol table before calling.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_wrap_action(
+        &mut self,
+        action: &Action,
+        symtab: &SymbolTable,
+        library: Option<&FunctionLibrary>,
+        env_vars: &HashMap<String, Option<String>>,
+        message_tx: mpsc::UnboundedSender<ActionMessage>,
+        default_timeout: Option<Duration>,
+    ) -> Result<SubprocessResult, SessionError> {
+        self.base
+            .run_action(
+                action,
+                symtab,
+                library,
+                env_vars,
+                message_tx,
+                default_timeout,
+                Duration::from_secs(30),
+            )
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]

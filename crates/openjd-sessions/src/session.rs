@@ -28,6 +28,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use openjd_expr::function_library::FunctionLibrary;
@@ -40,6 +41,7 @@ use tokio_util::sync::CancellationToken;
 use crate::action::{ActionMessage, ActionResult, ActionState};
 use crate::action_status::ActionStatus;
 use crate::cross_user_helper::run_via_helper;
+use crate::embedded_files::{EmbeddedFiles, EmbeddedFilesScope};
 
 /// Default notify period (in seconds) for `NOTIFY_THEN_TERMINATE` cancel when
 /// no explicit time_limit is provided. Matches the OpenJD spec default.
@@ -203,14 +205,29 @@ impl ActionStatusFields {
     }
 }
 
-/// Cancellation state for the current action and external cancellation support.
-struct CancelFields {
+/// Cancellation state for the current action, shared with any
+/// [`SessionCancelHandle`]s so cancellation can be requested from another
+/// thread while the `Session` itself is owned by an action-running thread.
+struct CancelShared {
     /// Token for the current action (cancelled to abort the subprocess).
     token: Option<CancellationToken>,
     /// Channel to send cancel requests (with optional time limit) to the subprocess.
     request_tx: Option<tokio::sync::watch::Sender<Option<Duration>>>,
+    /// The running action's declared NOTIFY_THEN_TERMINATE grace period,
+    /// recorded once the effective action is known so helper-pipe cancel
+    /// delivery can cap the notify period at it — mirroring the same-user
+    /// path, where the runner computes `time_limit.min(terminate_delay)`
+    /// (see `subprocess.rs`). `None` when the action does not declare
+    /// notifyThenTerminate cancelation.
+    terminate_delay: Option<Duration>,
     /// When true, a Canceled action result is reported as Failed.
     mark_failed: bool,
+}
+
+/// Cancellation state for the current action and external cancellation support.
+struct CancelFields {
+    /// Per-action cancellation state, shared with `SessionCancelHandle`s.
+    shared: Arc<StdMutex<CancelShared>>,
     /// External cancellation token from the caller; action tokens are children of this.
     parent_token: Option<CancellationToken>,
 }
@@ -218,11 +235,192 @@ struct CancelFields {
 impl CancelFields {
     fn new(parent_token: Option<CancellationToken>) -> Self {
         Self {
-            token: None,
-            request_tx: None,
-            mark_failed: false,
+            shared: Arc::new(StdMutex::new(CancelShared {
+                token: None,
+                request_tx: None,
+                terminate_delay: None,
+                mark_failed: false,
+            })),
             parent_token,
         }
+    }
+
+    /// Lock the shared state, recovering from a poisoned mutex. The state is
+    /// plain data (no invariants across fields), so recovery is safe.
+    fn lock(&self) -> std::sync::MutexGuard<'_, CancelShared> {
+        self.shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn set_action(
+        &self,
+        token: CancellationToken,
+        request_tx: tokio::sync::watch::Sender<Option<Duration>>,
+    ) {
+        let mut shared = self.lock();
+        shared.token = Some(token);
+        shared.request_tx = Some(request_tx);
+        // The effective action (and hence its declared grace period) is not
+        // known yet at registration time — an RFC 0008 wrap hook may still
+        // substitute the action. Cleared here; recorded by
+        // `set_terminate_delay` once the action to run is resolved.
+        shared.terminate_delay = None;
+    }
+
+    /// Record the effective action's declared NOTIFY_THEN_TERMINATE grace
+    /// period. Called after `set_action`, once any wrap-hook substitution
+    /// has resolved which action will actually run.
+    fn set_terminate_delay(&self, delay: Option<Duration>) {
+        self.lock().terminate_delay = delay;
+    }
+
+    fn reset(&self) {
+        let mut shared = self.lock();
+        shared.token = None;
+        shared.request_tx = None;
+        shared.terminate_delay = None;
+        shared.mark_failed = false;
+    }
+}
+
+/// A thread-safe handle for cancelling a `Session`'s currently running
+/// action from another thread — including while the `Session` value itself
+/// is exclusively borrowed (or owned) by the thread driving the action.
+///
+/// Obtain one via [`Session::cancel_handle`]. The handle stays valid for the
+/// life of the session and can be used repeatedly: each action installs its
+/// own cancellation token, and [`SessionCancelHandle::cancel`] cancels
+/// whichever action is running at the time of the call.
+///
+/// Cancellation delivered through this handle follows the action's own
+/// cancelation method (e.g. NOTIFY_THEN_TERMINATE), exactly like
+/// [`Session::cancel_action`]. One difference: the handle cannot update the
+/// session's `state` field (the `Session` is owned elsewhere), so the
+/// `Running` → `Canceling` transition that `cancel_action` performs is not
+/// reflected; the state moves directly to the terminal value when the
+/// canceled action finishes. Callers tracking a Canceling phase must do so
+/// themselves.
+pub struct SessionCancelHandle {
+    shared: Arc<StdMutex<CancelShared>>,
+    /// Dup'd cancel-command pipe to the cross-user helper, when one exists.
+    cancel_writer: Option<std::fs::File>,
+    helper_auth_token: Option<String>,
+}
+
+impl SessionCancelHandle {
+    /// Request cancellation of the currently running action.
+    ///
+    /// * `time_limit` — same semantics as [`Session::cancel_action`]: an
+    ///   urgent bound on the cancel; `Some(0)` turns a notify-then-terminate
+    ///   cancel into an immediate terminate.
+    /// * `mark_action_failed` — report the canceled action as Failed
+    ///   instead of Canceled.
+    ///
+    /// Returns `true` if a running action was found and cancellation was
+    /// delivered; `false` if no action was running.
+    pub fn cancel(&self, time_limit: Option<Duration>, mark_action_failed: bool) -> bool {
+        // Hold the lock across the whole delivery so the target cannot
+        // change out from under us: `set_action`/`reset` (start/end of an
+        // action on the session thread) take the same lock, so the helper
+        // pipe command, the time-limit send, and the token cancel are all
+        // guaranteed to refer to the same action.
+        let mut shared = self
+            .shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(token) = shared.token.clone() else {
+            return false;
+        };
+        if mark_action_failed {
+            shared.mark_failed = true;
+        }
+
+        // Cross-user sessions: also deliver the cancel command to the helper
+        // process over the dup'd pipe, mirroring Session::cancel_action.
+        if let Some(ref writer) = self.cancel_writer {
+            send_helper_cancel_command(
+                writer,
+                self.helper_auth_token.as_deref(),
+                time_limit,
+                shared.terminate_delay,
+            );
+        }
+
+        if let Some(tx) = &shared.request_tx {
+            let _ = tx.send(time_limit);
+        }
+        token.cancel();
+        true
+    }
+}
+
+/// Write a tokenized cancel command to the cross-user helper's cancel pipe.
+/// Shared by [`Session::cancel_action`] and [`SessionCancelHandle::cancel`].
+fn send_helper_cancel_command(
+    mut writer: &std::fs::File,
+    auth_token: Option<&str>,
+    time_limit: Option<Duration>,
+    terminate_delay: Option<Duration>,
+) {
+    use std::io::Write;
+    // The effective grace bound is the smaller of the caller's time_limit
+    // and the action's declared notifyThenTerminate period — mirroring the
+    // same-user path, where the runner computes
+    // `time_limit.min(terminate_delay)` (see `subprocess.rs`). Absent a
+    // time_limit, the declared period applies on its own; absent both, the
+    // legacy default is used.
+    let effective_limit = match (time_limit, terminate_delay) {
+        (Some(limit), Some(delay)) => Some(limit.min(delay)),
+        (limit, delay) => limit.or(delay),
+    };
+    let is_terminate = matches!(effective_limit, Some(d) if d.is_zero());
+    let token_field = match auth_token {
+        Some(t) => format!(r#""token":"{t}","#),
+        None => String::new(),
+    };
+    let cmd = if is_terminate {
+        format!(r#"{{{token_field}"cancel":"TERMINATE"}}"#)
+    } else {
+        let notify_period = effective_limit
+            .unwrap_or(Duration::from_secs(DEFAULT_CANCEL_NOTIFY_PERIOD_SECS))
+            .as_secs();
+        format!(
+            r#"{{{token_field}"cancel":"NOTIFY_THEN_TERMINATE","notifyPeriodInSeconds":{notify_period}}}"#
+        )
+    };
+    let _ = writer.write_all(cmd.as_bytes());
+    let _ = writer.write_all(b"\n");
+    let _ = writer.flush();
+}
+
+/// The declared NOTIFY_THEN_TERMINATE grace period of an action, if any.
+///
+/// Derives through [`crate::runner::cancel_method_for_action`] so the value
+/// recorded for helper-pipe cancel delivery is exactly what the runner will
+/// enforce on the same-user path.
+fn declared_terminate_delay(
+    cancelation: &Option<openjd_model::job::CancelationMode>,
+    symtab: &SymbolTable,
+    library: Option<&FunctionLibrary>,
+    default_notify_period: Duration,
+) -> Option<Duration> {
+    match crate::runner::cancel_method_for_action(
+        cancelation,
+        symtab,
+        library,
+        default_notify_period,
+    ) {
+        Ok(crate::runner::CancelMethod::NotifyThenTerminate { terminate_delay }) => {
+            Some(terminate_delay)
+        }
+        Ok(crate::runner::CancelMethod::Terminate) => None,
+        // Resolution failures are surfaced authoritatively by the runner's
+        // own cancel_method_for_action call when the action executes; this
+        // value is only an advisory cap for helper-pipe cancel delivery,
+        // so treat a failure as "no declared grace" rather than duplicating
+        // the error path here.
+        Err(_) => None,
     }
 }
 
@@ -498,7 +696,7 @@ impl Session {
         // it is emitted both as a structured field and in the message text so
         // log consumers can associate this line with the rest of the session.
         // See the module-level docs for rationale.
-        log::info!(target: "openjd.sessions", session_id = config.session_id.as_str(); "Initializing Open Job Description Session: {}", &config.session_id);
+        log::info!(target: "openjd.sessions", session_id = config.session_id.as_str(); "Initializing Open Job Description Session: {}", config.session_id);
         session_log!(
             info,
             &config.session_id,
@@ -709,7 +907,7 @@ impl Session {
         }
         self.state = SessionState::Canceling;
         if mark_action_failed {
-            self.cancel.mark_failed = true;
+            self.cancel.lock().mark_failed = true;
         }
 
         // Send cancel to the helper process via the dup'd stdin fd.
@@ -720,35 +918,81 @@ impl Session {
         // via `set_cancel_writer_for_test`), the test is responsible for
         // asserting whatever framing it expects; we still write a valid
         // tokenized command if we have a token.
-        if let Some(ref mut writer) = self.cross_user.cancel_writer {
-            use std::io::Write;
-            let is_terminate = matches!(time_limit, Some(d) if d.is_zero());
-            let token_field = match &self.cross_user.helper_auth_token {
-                Some(t) => format!(r#""token":"{t}","#),
-                None => String::new(),
-            };
-            let cmd = if is_terminate {
-                format!(r#"{{{token_field}"cancel":"TERMINATE"}}"#)
-            } else {
-                let notify_period = time_limit
-                    .unwrap_or(Duration::from_secs(DEFAULT_CANCEL_NOTIFY_PERIOD_SECS))
-                    .as_secs();
-                format!(
-                    r#"{{{token_field}"cancel":"NOTIFY_THEN_TERMINATE","notifyPeriodInSeconds":{notify_period}}}"#
-                )
-            };
-            let _ = writer.write_all(cmd.as_bytes());
-            let _ = writer.write_all(b"\n");
-            let _ = writer.flush();
+        if let Some(ref writer) = self.cross_user.cancel_writer {
+            send_helper_cancel_command(
+                writer,
+                self.cross_user.helper_auth_token.as_deref(),
+                time_limit,
+                self.cancel.lock().terminate_delay,
+            );
         }
 
-        if let Some(tx) = &self.cancel.request_tx {
+        let (token, request_tx) = {
+            let shared = self.cancel.lock();
+            (shared.token.clone(), shared.request_tx.clone())
+        };
+        if let Some(tx) = request_tx {
             let _ = tx.send(time_limit);
         }
-        if let Some(token) = &self.cancel.token {
+        if let Some(token) = token {
             token.cancel();
         }
         Ok(())
+    }
+
+    /// Get a thread-safe handle for cancelling this session's running action
+    /// from another thread, e.g. while the `Session` value is owned by the
+    /// thread driving the action. See [`SessionCancelHandle`].
+    pub fn cancel_handle(&self) -> SessionCancelHandle {
+        let cancel_writer = self.clone_cancel_writer();
+        if self.cross_user.cancel_writer.is_some() && cancel_writer.is_none() {
+            // try_clone failed: the handle will still cancel same-user
+            // subprocesses via the token, but helper-routed processes
+            // would not receive the pipe command. Surface it rather than
+            // failing silently at cancel time.
+            session_log!(
+                warn,
+                &self.session_id,
+                LogContent::PROCESS_CONTROL,
+                "Failed to duplicate the cross-user cancel pipe for a cancel \
+                 handle; cancels via this handle will not reach helper-run \
+                 processes"
+            );
+        }
+        SessionCancelHandle {
+            shared: self.cancel.shared.clone(),
+            cancel_writer,
+            helper_auth_token: self.cross_user.helper_auth_token.clone(),
+        }
+    }
+
+    /// Record a failure that occurred while setting up an action that has
+    /// already been reported as Running (e.g. wrap-symbol seeding or path
+    /// mapping materialization failing before the subprocess dispatch).
+    ///
+    /// Without this, an early `?` return would leave the session state
+    /// permanently `Running` with no terminal `ActionStatus` — callers
+    /// polling for completion (notably the Python bindings) would hang, and
+    /// nothing about the failure would appear in the session log.
+    ///
+    /// Marks the action Failed with the error message, resets cancellation
+    /// state, drops out of Running, logs the failure, and notifies the
+    /// callback. Returns the error so call sites can use it in `map_err`.
+    fn fail_action_setup(&mut self, e: SessionError) -> SessionError {
+        session_log!(
+            error,
+            &self.session_id,
+            LogContent::EXCEPTION_INFO,
+            "Action failed to run: {e}"
+        );
+        self.action.state = Some(ActionState::Failed);
+        self.action.fail_message = Some(e.to_string());
+        self.action.ended_at = Some(std::time::SystemTime::now());
+        self.action.exit_code = None;
+        self.cancel.reset();
+        self.state = SessionState::ReadyEnding;
+        self.notify_callback();
+        e
     }
 
     /// Clean up the session. Deletes working directory if not retained.
@@ -848,6 +1092,27 @@ impl Session {
             });
         }
 
+        // RFC 0008 single-layer rule: at most one environment in the session
+        // stack may define any wrap hook. The model-level validator enforces
+        // this within a single job template, but environments supplied
+        // separately (external environment templates, worker-agent-injected
+        // environments) can only be checked here — at enter time, before any
+        // state for the new environment is recorded, so the session stays
+        // Ready and no cleanup is owed for the rejected environment. This
+        // mirrors the Python runtime's check in Session.enter_environment.
+        if env_has_any_wrap_hook(env) {
+            for entered_id in &self.environments_entered {
+                if let Some(existing) = self.environments.get(entered_id) {
+                    if env_has_any_wrap_hook(existing) {
+                        return Err(SessionError::MultipleWrapEnvironments {
+                            existing: existing.name.clone(),
+                            entering: env.name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
         let symtab = self.build_symbol_table(None, resolved_symtab)?;
 
         let identifier = match identifier {
@@ -901,12 +1166,78 @@ impl Session {
 
             let cancel_token = self.new_action_cancel_token();
             let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(None);
-            self.cancel.token = Some(cancel_token.clone());
-            self.cancel.request_tx = Some(cancel_tx);
+            self.cancel.set_action(cancel_token.clone(), cancel_tx);
 
             let env_vars = self.evaluate_env_vars(os_env_vars);
             let mut action_symtab = symtab.clone();
-            self.materialize_path_mapping(&mut action_symtab)?;
+            self.materialize_path_mapping(&mut action_symtab)
+                .map_err(|e| self.fail_action_setup(e))?;
+
+            // RFC 0008: if an outer active wrap env (not including this
+            // one — which isn't on the stack yet but the helper guards
+            // against it anyway) defines onWrapEnvEnter, substitute that
+            // action and seed WrappedAction.* / WrappedEnv.* with the
+            // inner onEnter's resolved command/args/timeout.
+            let inner_on_enter = env
+                .script
+                .as_ref()
+                .and_then(|s| s.actions.on_enter.as_ref())
+                .expect("outer branch guard");
+            let wrap_action = self.wrap_env_excluding(&identifier).and_then(|outer| {
+                outer
+                    .script
+                    .as_ref()
+                    .and_then(|s| s.actions.on_wrap_env_enter.as_ref())
+                    .cloned()
+                    .map(|action| (WrapEnvironmentScope::from(outer), action))
+            });
+
+            let lib = self.library.clone();
+            if let Some((wrap_env, _)) = wrap_action.as_ref() {
+                // The wrapped onEnter resolves against the INNER env's own
+                // scope (its embedded files and lets) — the same scope
+                // `runner.enter` would have built had the action run
+                // unwrapped. The hook itself resolves against the wrap
+                // env's scope built in seed_wrapped_action_symbols.
+                let inner_symtab = self
+                    .build_wrapped_inner_scope(
+                        EmbeddedFilesScope::Env,
+                        env.script.as_ref().and_then(|s| s.let_bindings.as_deref()),
+                        env.script
+                            .as_ref()
+                            .and_then(|s| s.embedded_files.as_deref()),
+                        &action_symtab,
+                        Some(&lib),
+                    )
+                    .map_err(|e| self.fail_action_setup(e))?;
+                seed_wrapped_action_symbols(
+                    &mut action_symtab,
+                    wrap_env,
+                    &inner_symtab,
+                    inner_on_enter,
+                    WrappedContext::Env(&env.name),
+                    &self.env_vars,
+                    Some(&lib),
+                    "onEnter",
+                )
+                .map_err(|e| self.fail_action_setup(e))?;
+            }
+
+            // The effective action is now resolved (wrap hook or the env's
+            // own onEnter); record its declared cancel grace so helper-pipe
+            // cancel delivery can cap the notify period at it. The default
+            // matches EnvironmentScriptRunner's default_cancel_period.
+            self.cancel.set_terminate_delay(declared_terminate_delay(
+                &wrap_action
+                    .as_ref()
+                    .map(|(_, a)| a)
+                    .unwrap_or(inner_on_enter)
+                    .cancelation,
+                &action_symtab,
+                Some(&lib),
+                Duration::from_secs(30),
+            ));
+
             // Box large locals — see run_task for rationale.
             let action_symtab = Box::new(action_symtab);
             let env_vars = Box::new(env_vars);
@@ -944,11 +1275,25 @@ impl Session {
 
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-            let lib = self.library.clone();
             // Box::pin keeps the inner subprocess/select! state machine off the
             // outer future's stack. Without this, the combined future exceeds
-            // Windows' default 1 MB thread stack in release builds.
-            let runner_fut = Box::pin(runner.enter(env, &action_symtab, Some(&lib), &env_vars, tx));
+            // Windows' default 1 MB thread stack in release builds. The boxed
+            // type unifies the two match arms; it is intentionally NOT `+ Send`
+            // because on Windows the subprocess future holds a non-Send
+            // `Option<HANDLE>` across an await (and `drive_action` does not
+            // require `Send`), matching the plain `enter`/`exit`/`run` paths.
+            let runner_fut: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
+                match wrap_action.as_ref() {
+                    Some((_, action)) => Box::pin(runner.run_wrap_action(
+                        action,
+                        &action_symtab,
+                        Some(&lib),
+                        &env_vars,
+                        tx,
+                        None,
+                    )),
+                    None => Box::pin(runner.enter(env, &action_symtab, Some(&lib), &env_vars, tx)),
+                };
             let result = self.drive_action(runner_fut, &mut rx, &identifier).await;
             self.cross_user.helper = runner.take_helper();
             let result = result?;
@@ -1011,14 +1356,12 @@ impl Session {
             });
         }
 
-        // Validate identifier exists
-        let env = self
-            .environments
-            .get(identifier)
-            .ok_or_else(|| SessionError::UnknownEnvironment {
+        // Validate identifier exists before doing any setup work.
+        if !self.environments.contains_key(identifier) {
+            return Err(SessionError::UnknownEnvironment {
                 identifier: identifier.to_string(),
-            })?
-            .clone();
+            });
+        }
 
         // Validate LIFO order
         if self.environments_entered.last() != Some(identifier) {
@@ -1047,7 +1390,11 @@ impl Session {
         // Remove environment from tracking BEFORE running the exit script.
         // This matches the Python session behavior — a failed exit is still an exit,
         // and subsequent exits must be able to proceed in LIFO order.
-        self.environments.remove(identifier);
+        let env = self.environments.remove(identifier).ok_or_else(|| {
+            SessionError::UnknownEnvironment {
+                identifier: identifier.to_string(),
+            }
+        })?;
         self.environments_entered.pop();
 
         let output = if env
@@ -1067,11 +1414,71 @@ impl Session {
 
             let cancel_token = self.new_action_cancel_token();
             let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(None);
-            self.cancel.token = Some(cancel_token.clone());
-            self.cancel.request_tx = Some(cancel_tx);
+            self.cancel.set_action(cancel_token.clone(), cancel_tx);
 
             let mut action_symtab = symtab.clone();
-            self.materialize_path_mapping(&mut action_symtab)?;
+            self.materialize_path_mapping(&mut action_symtab)
+                .map_err(|e| self.fail_action_setup(e))?;
+
+            // RFC 0008: does an outer active wrap env wrap this onExit?
+            // The env being exited has already been popped from the stack
+            // by this point, so `active_wrap_env` correctly returns only
+            // the remaining envs — which is what we want.
+            let inner_on_exit = env
+                .script
+                .as_ref()
+                .and_then(|s| s.actions.on_exit.as_ref())
+                .expect("outer branch guard");
+            let wrap_action = self.active_wrap_env().and_then(|outer| {
+                outer
+                    .script
+                    .as_ref()
+                    .and_then(|s| s.actions.on_wrap_env_exit.as_ref())
+                    .cloned()
+                    .map(|action| (WrapEnvironmentScope::from(outer), action))
+            });
+
+            let lib = self.library.clone();
+            if let Some((wrap_env, _)) = wrap_action.as_ref() {
+                // See the onEnter path: the wrapped onExit resolves against
+                // the INNER env's own scope.
+                let inner_symtab = self
+                    .build_wrapped_inner_scope(
+                        EmbeddedFilesScope::Env,
+                        env.script.as_ref().and_then(|s| s.let_bindings.as_deref()),
+                        env.script
+                            .as_ref()
+                            .and_then(|s| s.embedded_files.as_deref()),
+                        &action_symtab,
+                        Some(&lib),
+                    )
+                    .map_err(|e| self.fail_action_setup(e))?;
+                seed_wrapped_action_symbols(
+                    &mut action_symtab,
+                    wrap_env,
+                    &inner_symtab,
+                    inner_on_exit,
+                    WrappedContext::Env(&env.name),
+                    &self.env_vars,
+                    Some(&lib),
+                    "onExit",
+                )
+                .map_err(|e| self.fail_action_setup(e))?;
+            }
+
+            // See the onEnter path: record the effective action's declared
+            // cancel grace once the wrap decision is made.
+            self.cancel.set_terminate_delay(declared_terminate_delay(
+                &wrap_action
+                    .as_ref()
+                    .map(|(_, a)| a)
+                    .unwrap_or(inner_on_exit)
+                    .cancelation,
+                &action_symtab,
+                Some(&lib),
+                Duration::from_secs(30),
+            ));
+
             // Box large locals — see run_task for rationale.
             let action_symtab = Box::new(action_symtab);
             #[allow(unused_mut)]
@@ -1108,10 +1515,28 @@ impl Session {
 
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-            let lib = self.library.clone();
             // See the note in the onEnter path about Box::pin and the Windows
-            // 1 MB thread-stack limit on release builds.
-            let runner_fut = Box::pin(runner.exit(&env, &action_symtab, Some(&lib), &env_vars, tx));
+            // 1 MB thread-stack limit on release builds. As there, the boxed
+            // type is intentionally NOT `+ Send` (the subprocess future holds a
+            // non-Send `Option<HANDLE>` across an await on Windows).
+            let runner_fut: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
+                match wrap_action.as_ref() {
+                    // RFC 0008 / Template Schemas §5 defaults table: the
+                    // substituted onWrapEnvExit gets the same 300-second
+                    // default timeout as the onExit it replaces, so a hung
+                    // wrap-exit script cannot block session teardown
+                    // indefinitely. (The enter path correctly passes None —
+                    // onEnter/onWrapEnvEnter have no default timeout.)
+                    Some((_, action)) => Box::pin(runner.run_wrap_action(
+                        action,
+                        &action_symtab,
+                        Some(&lib),
+                        &env_vars,
+                        tx,
+                        Some(crate::runner::env_script::ENV_EXIT_DEFAULT_TIMEOUT),
+                    )),
+                    None => Box::pin(runner.exit(&env, &action_symtab, Some(&lib), &env_vars, tx)),
+                };
             let result = self.drive_action(runner_fut, &mut rx, identifier).await;
             self.cross_user.helper = runner.take_helper();
             let result = result?;
@@ -1160,8 +1585,13 @@ impl Session {
     }
 
     /// Run a step action asynchronously.
+    ///
+    /// `step_name` is the name of the step whose task is being run; it is
+    /// surfaced as `WrappedStep.Name` to a wrapping environment's
+    /// `onWrapTaskRun` hook (RFC 0008).
     pub async fn run_task(
         &mut self,
+        step_name: &str,
         script: &StepScript,
         task_parameter_values: Option<&openjd_model::types::TaskParameterSet>,
         resolved_symtab: Option<&openjd_expr::SerializedSymbolTable>,
@@ -1184,12 +1614,72 @@ impl Session {
 
         let cancel_token = self.new_action_cancel_token();
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(None);
-        self.cancel.token = Some(cancel_token.clone());
-        self.cancel.request_tx = Some(cancel_tx);
+        self.cancel.set_action(cancel_token.clone(), cancel_tx);
 
         let env_vars = self.evaluate_env_vars(os_env_vars);
         let mut action_symtab = symtab.clone();
-        self.materialize_path_mapping(&mut action_symtab)?;
+        self.materialize_path_mapping(&mut action_symtab)
+            .map_err(|e| self.fail_action_setup(e))?;
+
+        // RFC 0008: decide whether this task's onRun should be wrapped by
+        // an active environment's onWrapTaskRun. The decision is:
+        //   - If an active wrap env defines onWrapTaskRun, we substitute
+        //     the wrap action and seed WrappedAction.* into the symbol
+        //     table so the wrap script can forward the original command
+        //     and args.
+        //
+        // If neither condition routes us into the wrap path, the original
+        // step script runs exactly as before — this keeps the non-WRAP_ACTIONS
+        // path a zero-cost addition.
+        //
+        // Scope note: this pass does NOT re-materialize the wrap environment's
+        // embedded files. Wrap actions that reference `{{Env.File.*}}` will
+        // see only the names registered when the wrap env was entered, which
+        // are not persisted across action runs. Inline wrap scripts
+        // (`command: bash, args: ["-c", "..."]`) work without this. Re-running
+        // `allocate_file_paths` against the wrap env's embedded_files at task
+        // dispatch time is the follow-up to enable `Env.File.*` inside wrap
+        // hooks end-to-end.
+        let lib = self.library.clone();
+        let wrap_action: Option<openjd_model::job::Action> = self
+            .active_wrap_env()
+            .and_then(|wrap_env| {
+                wrap_env
+                    .script
+                    .as_ref()
+                    .and_then(|s| s.actions.on_wrap_task_run.clone())
+                    .map(|action| (WrapEnvironmentScope::from(wrap_env), action))
+            })
+            .map(|(wrap_env, action)| {
+                // Seed WrappedAction.* / WrappedStep.Name from the step's own
+                // onRun. The wrapped onRun resolves against the STEP's own
+                // scope — its embedded files and script-level lets, the same
+                // scope StepScriptRunner::run would have built unwrapped —
+                // while the hook resolves against the wrap env's scope built
+                // in seed_wrapped_action_symbols. Shared with the
+                // onEnter/onExit hooks so all three behave identically.
+                let inner_symtab = self.build_wrapped_inner_scope(
+                    EmbeddedFilesScope::Step,
+                    script.let_bindings.as_deref(),
+                    script.embedded_files.as_deref(),
+                    &action_symtab,
+                    Some(&lib),
+                )?;
+                seed_wrapped_action_symbols(
+                    &mut action_symtab,
+                    &wrap_env,
+                    &inner_symtab,
+                    &script.actions.on_run,
+                    WrappedContext::Step(step_name),
+                    &self.env_vars,
+                    Some(&lib),
+                    "task",
+                )?;
+                Ok::<_, SessionError>(action)
+            })
+            .transpose()
+            .map_err(|e| self.fail_action_setup(e))?;
+
         // Box large locals so they live on the heap instead of inflating
         // this async fn's state machine. Without this, the combined future
         // (run_task → drive_action → select!) exceeds Windows' default
@@ -1231,10 +1721,44 @@ impl Session {
         let step_identifier = format!("{}:step:{}", self.session_id, uuid::Uuid::new_v4().simple());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let lib = self.library.clone();
+        // Build the script the runner actually executes. When a wrap hook
+        // is in play, the step's own onRun is replaced by the wrap action,
+        // and the step's let_bindings/embedded_files are dropped from the
+        // runner's script: they belong to the WRAPPED (inner) scope, which
+        // build_wrapped_inner_scope already materialized when resolving
+        // WrappedAction.* above. Re-applying them here would overwrite the
+        // wrap environment's own let bindings in the hook's scope — a
+        // same-named binding would make the hook see the step's value
+        // while WrappedAction.* carried the wrapper's (or vice versa).
+        let effective_script: std::borrow::Cow<'_, StepScript> = match wrap_action {
+            Some(action) => std::borrow::Cow::Owned(StepScript {
+                let_bindings: None,
+                actions: openjd_model::job::StepActions { on_run: action },
+                embedded_files: None,
+            }),
+            None => std::borrow::Cow::Borrowed(script),
+        };
+
+        // The effective action is now resolved (wrap hook or the step's own
+        // onRun); record its declared cancel grace so helper-pipe cancel
+        // delivery can cap the notify period at it. The default matches
+        // StepScriptRunner's default_cancel_period.
+        self.cancel.set_terminate_delay(declared_terminate_delay(
+            &effective_script.actions.on_run.cancelation,
+            &action_symtab,
+            Some(&lib),
+            Duration::from_secs(120),
+        ));
+
         // See the note in the onEnter path about Box::pin and the Windows
         // 1 MB thread-stack limit on release builds.
-        let runner_fut = Box::pin(runner.run(script, &action_symtab, Some(&lib), &env_vars, tx));
+        let runner_fut = Box::pin(runner.run(
+            effective_script.as_ref(),
+            &action_symtab,
+            Some(&lib),
+            &env_vars,
+            tx,
+        ));
         let result = self
             .drive_action(runner_fut, &mut rx, &step_identifier)
             .await;
@@ -1317,8 +1841,7 @@ impl Session {
 
         let cancel_token = self.new_action_cancel_token();
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(None);
-        self.cancel.token = Some(cancel_token.clone());
-        self.cancel.request_tx = Some(cancel_tx);
+        self.cancel.set_action(cancel_token.clone(), cancel_tx);
 
         let config = crate::subprocess::SubprocessConfig {
             args: cmd_args,
@@ -1366,6 +1889,20 @@ impl Session {
         env_vars: std::collections::HashMap<String, Option<String>>,
         _timeout: Option<Duration>,
     ) -> Result<crate::subprocess::SubprocessResult, SessionError> {
+        // Register per-action cancel state even though the helper protocol —
+        // not the token — carries the cancel to the subprocess: the token's
+        // presence is what tells a `SessionCancelHandle` that an action is
+        // in flight, so `cancel()` proceeds to write the helper pipe command
+        // (and returns true) instead of reporting "nothing running".
+        //
+        // The watch receiver goes into the SubprocessConfig: run_via_helper
+        // classifies the exit as Canceled only when the cancel-request
+        // channel has fired (rx.has_changed()), so without it a canceled
+        // helper subprocess would be misreported as Failed.
+        let cancel_token = self.new_action_cancel_token();
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(None);
+        self.cancel.set_action(cancel_token, cancel_tx);
+
         let mut filter = crate::action_filter::ActionFilter::new(
             &self.session_id,
             self.echo_openjd_directives,
@@ -1385,7 +1922,7 @@ impl Session {
             timeout: _timeout,
             user: self.cross_user.user.clone(),
             cancel_method: crate::runner::CancelMethod::Terminate,
-            cancel_request_rx: None,
+            cancel_request_rx: Some(cancel_rx),
             debug_collect_stdout: self.debug_collect_stdout,
         };
 
@@ -1409,20 +1946,34 @@ impl Session {
             self.apply_message(msg, &subprocess_identifier);
         }
 
-        let r = result?;
-        self.action.state = Some(r.state);
+        // A helper-run failure must not leave the session wedged in Running
+        // with no terminal ActionStatus — same contract as drive_action's
+        // error branch.
+        let r = result.map_err(|e| self.fail_action_setup(e))?;
+
+        // Same mark_failed conversion as drive_action: a cancel requested
+        // with mark_action_failed=true (e.g. via SessionCancelHandle) must
+        // report the canceled action as Failed, not Canceled.
+        let final_state = if self.cancel.lock().mark_failed && r.state == ActionState::Canceled {
+            ActionState::Failed
+        } else {
+            r.state
+        };
+
+        self.action.state = Some(final_state);
         self.action.ended_at = Some(std::time::SystemTime::now());
         self.action.exit_code = r.exit_code;
-        self.cancel.token = None;
-        self.cancel.request_tx = None;
-        self.cancel.mark_failed = false;
-        self.state = if r.state == ActionState::Success {
+        self.cancel.reset();
+        self.state = if final_state == ActionState::Success {
             SessionState::Ready
         } else {
             SessionState::ReadyEnding
         };
         self.notify_callback();
-        Ok(r)
+        Ok(crate::subprocess::SubprocessResult {
+            state: final_state,
+            ..r
+        })
     }
 
     // --- Internal helpers ---
@@ -1467,13 +2018,20 @@ impl Session {
             Ok(r) => r,
             Err(e) => {
                 // The subprocess failed to start or the runner encountered an error.
-                // Update session state so callers see Failed instead of stuck Running.
+                // Update session state so callers see Failed instead of stuck Running,
+                // record the reason on the action status, and log it — otherwise the
+                // failure is invisible to log-followers and status pollers alike.
+                session_log!(
+                    error,
+                    &self.session_id,
+                    LogContent::EXCEPTION_INFO,
+                    "Action failed to run: {e}"
+                );
                 self.action.state = Some(ActionState::Failed);
+                self.action.fail_message = Some(e.to_string());
                 self.action.ended_at = Some(std::time::SystemTime::now());
                 self.action.exit_code = None;
-                self.cancel.token = None;
-                self.cancel.request_tx = None;
-                self.cancel.mark_failed = false;
+                self.cancel.reset();
                 self.state = SessionState::ReadyEnding;
 
                 if let Some(cb) = &self.callback {
@@ -1488,7 +2046,7 @@ impl Session {
 
         // If the action was canceled but mark_action_failed is set,
         // report it as Failed instead of Canceled (matches Python behavior)
-        let final_state = if self.cancel.mark_failed && r.state == ActionState::Canceled {
+        let final_state = if self.cancel.lock().mark_failed && r.state == ActionState::Canceled {
             ActionState::Failed
         } else {
             r.state
@@ -1497,9 +2055,7 @@ impl Session {
         self.action.state = Some(final_state);
         self.action.ended_at = Some(std::time::SystemTime::now());
         self.action.exit_code = r.exit_code;
-        self.cancel.token = None;
-        self.cancel.request_tx = None;
-        self.cancel.mark_failed = false;
+        self.cancel.reset();
 
         self.state = if self.ending_only || final_state != ActionState::Success {
             SessionState::ReadyEnding
@@ -1871,6 +2427,406 @@ impl Session {
             _ => value.clone(),
         }
     }
+
+    // ────────────────────────────────────────────────────────────────
+    // RFC 0008: wrap-hook routing
+    // ────────────────────────────────────────────────────────────────
+
+    /// Build the scope a wrapped action would have resolved against had it
+    /// run unwrapped: `base` (the inner entity's own symbol table) plus its
+    /// embedded files and script-level `let` bindings, in the same order
+    /// the runners use (allocate file paths → evaluate lets → write file
+    /// contents, so `data` expressions can reference let-bound values).
+    ///
+    /// `WrappedAction.*` values are resolved against this table so that
+    /// names defined by the WRAPPING environment (its `Param.*`, its lets)
+    /// can never leak into the wrapped action's resolved command/args —
+    /// and, symmetrically, the inner entity's lets never apply to the
+    /// hook's own resolution scope.
+    fn build_wrapped_inner_scope(
+        &self,
+        scope: EmbeddedFilesScope,
+        let_bindings: Option<&[String]>,
+        embedded_files: Option<&[openjd_model::job::EmbeddedFile]>,
+        base: &SymbolTable,
+        lib: Option<&FunctionLibrary>,
+    ) -> Result<SymbolTable, SessionError> {
+        let mut st = base.clone();
+        let ef = if let Some(files) = embedded_files {
+            let mut ef = EmbeddedFiles::new(scope, self.files_directory.clone(), &self.session_id)
+                .with_user(self.cross_user.user.clone());
+            ef.allocate_file_paths(files, &mut st)?;
+            Some(ef)
+        } else {
+            None
+        };
+        if let Some(bindings) = let_bindings {
+            st = crate::let_bindings::evaluate_let_bindings(
+                bindings,
+                &st,
+                lib,
+                openjd_expr::PathFormat::host(),
+            )
+            .map_err(|e| SessionError::FormatString {
+                context: "let bindings".into(),
+                reason: e.to_string(),
+            })?;
+        }
+        if let Some(ef) = ef {
+            ef.write_file_contents(&st, lib)?;
+        }
+        Ok(st)
+    }
+
+    /// Return the innermost currently-active environment that defines *any*
+    /// wrap hook, if one exists.
+    ///
+    /// The model-level validator rejects templates with two or more wrap
+    /// layers in a single session, so this is effectively "the wrap env"
+    /// at runtime. The innermost-wins traversal defends against templates
+    /// that slipped past validation (e.g. if a future extension ever
+    /// permits nested composition) by picking the behavior closest to
+    /// the task and keeping the dispatch deterministic.
+    fn active_wrap_env(&self) -> Option<&Environment> {
+        for id in self.environments_entered.iter().rev() {
+            if let Some(env) = self.environments.get(id) {
+                if env_has_any_wrap_hook(env) {
+                    return Some(env);
+                }
+            }
+        }
+        None
+    }
+
+    /// Return the active wrap environment *excluding* the environment
+    /// currently entering or exiting (referenced by `self_id`). This is
+    /// what `onWrapEnvEnter` / `onWrapEnvExit` dispatch needs: an environment's
+    /// own lifecycle actions are never wrapped by its own wrap hooks.
+    fn wrap_env_excluding(&self, self_id: &str) -> Option<&Environment> {
+        for id in self.environments_entered.iter().rev() {
+            if id == self_id {
+                continue;
+            }
+            if let Some(env) = self.environments.get(id) {
+                if env_has_any_wrap_hook(env) {
+                    return Some(env);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Returns true iff the environment defines any of the three wrap hooks
+/// from RFC 0008. The model-level validator enforces that this is either
+/// zero or one environment per session; this check gates runtime dispatch.
+fn env_has_any_wrap_hook(env: &Environment) -> bool {
+    env.script
+        .as_ref()
+        .map(|s| s.actions.has_any_wrap_hook())
+        .unwrap_or(false)
+}
+
+/// The wrapper-owned data needed after wrap dispatch releases its borrow of
+/// the Session environment stack. Deliberately excludes embedded files and
+/// other potentially large Environment fields.
+struct WrapEnvironmentScope {
+    name: String,
+    resolved_symtab: Option<openjd_expr::SerializedSymbolTable>,
+    let_bindings: Option<Vec<String>>,
+}
+
+impl From<&Environment> for WrapEnvironmentScope {
+    fn from(env: &Environment) -> Self {
+        Self {
+            name: env.name.clone(),
+            resolved_symtab: env.resolved_symtab.clone(),
+            let_bindings: env
+                .script
+                .as_ref()
+                .and_then(|script| script.let_bindings.clone()),
+        }
+    }
+}
+
+/// The wrap-hook context variable available in addition to
+/// `WrappedAction.*` (RFC 0008).
+pub(crate) enum WrappedContext<'a> {
+    /// Within `onWrapEnvEnter` / `onWrapEnvExit`: sets `WrappedEnv.Name`.
+    Env(&'a str),
+    /// Within `onWrapTaskRun`: sets `WrappedStep.Name`.
+    Step(&'a str),
+}
+
+/// Build the wrap hook's resolution scope on `action_symtab` and resolve
+/// the wrapped action's command/args/timeout/cancelation, overlaying the
+/// RFC 0008 `WrappedAction.*` (plus the companion `WrappedEnv`/`WrappedStep`
+/// variable) onto the hook's table.
+///
+/// Two distinct scopes are in play and MUST NOT be conflated:
+///
+/// - **Inner scope** (`inner_symtab`) — the scope the WRAPPED action would
+///   have resolved against had it run unwrapped (the inner entity's own
+///   symbols, including its `let` bindings where the caller evaluates
+///   them). `WrappedAction.Command`/`Args`/`Timeout`/`Cancelation.*` are
+///   resolved against this table, so a wrapper-defined name can never
+///   leak into the wrapped action's resolved values.
+/// - **Hook scope** (`action_symtab`, mutated in place) — the wrap
+///   environment's own scope: its frozen `resolved_symtab` (its `Param.*`)
+///   and its script-level `let` bindings (Template Schemas §4.2: an
+///   environment script's `let` names "are available in actions" — the
+///   wrap hooks are actions of the wrap environment's script), plus the
+///   `WrappedAction.*` overlay. The hook action resolves against this
+///   table only; the inner entity's `let` bindings are NOT applied to it.
+///
+/// This is the single implementation shared by the three wrap-hook call
+/// sites (`onWrapEnvEnter`, `onWrapTaskRun`, `onWrapEnvExit`), guaranteeing
+/// the hooks see identical `WrappedAction.*` semantics as the RFC requires.
+/// `phase` names the wrapped lifecycle action for error messages
+/// ("onEnter", "onExit", or "task").
+///
+/// `session_env_vars` MUST be the session's session-defined variables
+/// (`self.env_vars`): `openjd_env` exports plus entered environments'
+/// declarative `variables:` maps. Host-inherited variables are
+/// intentionally excluded per RFC 0008.
+#[allow(clippy::too_many_arguments)]
+fn seed_wrapped_action_symbols(
+    action_symtab: &mut SymbolTable,
+    wrap_env: &WrapEnvironmentScope,
+    inner_symtab: &SymbolTable,
+    wrapped_action: &openjd_model::job::Action,
+    context: WrappedContext<'_>,
+    session_env_vars: &HashMap<String, String>,
+    lib: Option<&FunctionLibrary>,
+    phase: &str,
+) -> Result<(), SessionError> {
+    // Layer the wrap env's frozen symtab on top of the hook's table so the
+    // wrap action can reference symbols only it knows about (its own
+    // `Param.*`). A deserialize failure is logged and skipped rather than
+    // failing the action — resolution will surface later only if a missing
+    // symbol is actually referenced.
+    if let Some(ser) = wrap_env.resolved_symtab.as_ref() {
+        match ser.to_symtab(openjd_expr::path_mapping::PathFormat::host()) {
+            Ok(st) => action_symtab.merge_from(&st),
+            Err(e) => {
+                log::warn!(
+                    target: "openjd.sessions",
+                    "wrap env resolved_symtab deserialize failed: {e}; \
+                     WrappedAction.* continues without it"
+                );
+            }
+        }
+    }
+
+    // The wrap env's own script-level `let` bindings are part of the scope
+    // its hooks resolve against. They are evaluated here — against the wrap
+    // env's frozen symtab merged above — rather than carried from enter
+    // time, because the session does not persist per-environment evaluated
+    // let scopes. The bindings only reference environment-scope symbols
+    // (Param.*, Session.*), so re-evaluation is deterministic.
+    if let Some(bindings) = wrap_env.let_bindings.as_deref() {
+        let with_lets = crate::let_bindings::evaluate_let_bindings(
+            bindings,
+            action_symtab,
+            lib,
+            openjd_expr::PathFormat::host(),
+        )
+        .map_err(|e| SessionError::FormatString {
+            context: format!("wrap environment '{}' let bindings", wrap_env.name),
+            reason: e.to_string(),
+        })?;
+        *action_symtab = with_lets;
+    }
+
+    // Resolve the wrapped action's command/args against the INNER scope.
+    // These seed WrappedAction.Command/Args.
+    let resolved_cmd = crate::runner::resolve_action_args(wrapped_action, inner_symtab, lib)
+        .map_err(|e| SessionError::FormatString {
+            context: format!("wrapped {phase} command"),
+            reason: e.to_string(),
+        })?;
+    let (cmd, args) = match resolved_cmd.split_first() {
+        Some((head, tail)) => (head.clone(), tail.to_vec()),
+        None => (String::new(), Vec::new()),
+    };
+    let wrapped_env: Vec<String> = session_env_vars
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    // WrappedAction.Timeout carries the ORIGINAL wrapped action's timeout
+    // (RFC 0008), not the wrap action's. `None` (null) means the wrapped
+    // action specified no timeout — int? per the EXPR optional-data
+    // semantics, so whole-field forwarding drops the field.
+    let wrapped_timeout_secs: Option<i64> =
+        crate::runner::resolve_action_timeout(wrapped_action, inner_symtab, lib, None)
+            .map_err(|e| SessionError::FormatString {
+                context: format!("wrapped {phase} timeout"),
+                reason: e.to_string(),
+            })?
+            .map(|d| d.as_secs() as i64);
+
+    // WrappedAction.Cancelation.{Mode, NotifyPeriodInSeconds} carry the
+    // wrapped action's cancelation config (RFC 0008). The mode is null
+    // (`None` here) when no <Cancelation> is defined; the notify period
+    // is null unless the mode is NOTIFY_THEN_TERMINATE.
+    //
+    // When the wrapped action requests NOTIFY_THEN_TERMINATE without an
+    // explicit notifyPeriodInSeconds, the runtime supplies the schema
+    // default for the action's position (Template Schemas §5.3.2:
+    // 120 seconds for a task's onRun, 30 seconds otherwise). This mirrors
+    // the value the runtime would have enforced if the action ran
+    // unwrapped.
+    // Resolution goes through the same helper the enforcement path uses
+    // (`resolve_effective_cancelation`) — including a wrapped action whose
+    // own mode is deferred (a format string) — so the value a wrap script
+    // sees is always the value the runtime would enforce.
+    let (wrapped_cancelation_mode, wrapped_cancelation_notify_period): (Option<&str>, Option<i64>) =
+        match crate::runner::resolve_effective_cancelation(
+            &wrapped_action.cancelation,
+            inner_symtab,
+            lib,
+        )? {
+            crate::runner::EffectiveCancelation::Undeclared => (None, None),
+            crate::runner::EffectiveCancelation::Terminate => (Some("TERMINATE"), None),
+            crate::runner::EffectiveCancelation::NotifyThenTerminate {
+                notify_period_seconds,
+            } => {
+                let default_period_secs: i64 = if phase == "task" { 120 } else { 30 };
+                (
+                    Some("NOTIFY_THEN_TERMINATE"),
+                    Some(notify_period_seconds.unwrap_or(default_period_secs)),
+                )
+            }
+        };
+
+    overlay_wrapped_action_symbols(
+        action_symtab,
+        Some(context),
+        &cmd,
+        &args,
+        &wrapped_env,
+        wrapped_timeout_secs,
+        wrapped_cancelation_mode,
+        wrapped_cancelation_notify_period,
+    )
+}
+
+/// Overlay the `WrappedAction.*` variables defined in RFC 0008 onto a
+/// symbol table in place. Used by all three wrap hooks:
+///
+/// - `WrappedAction.Command` — the wrapped action's resolved command string.
+/// - `WrappedAction.Args` — the wrapped action's resolved argument list.
+/// - `WrappedAction.Environment` — `"KEY=value"` entries for every
+///   session-defined variable captured so far: `openjd_env` exports and
+///   entered environments' declarative `variables:` maps.
+/// - `WrappedAction.Timeout` — the timeout in seconds of the wrapped
+///   action, or `null` when the wrapped action specified no timeout.
+/// - `WrappedAction.Cancelation.Mode` — `"TERMINATE"`,
+///   `"NOTIFY_THEN_TERMINATE"`, or `null` when the wrapped action defines
+///   no `<Cancelation>`.
+/// - `WrappedAction.Cancelation.NotifyPeriodInSeconds` — the effective
+///   grace period in seconds when the wrapped mode is
+///   `NOTIFY_THEN_TERMINATE` (with schema defaults applied when the
+///   wrapped action omits the field), or `null` otherwise.
+///
+/// `wrapped` selects the per-hook companion variable: `WrappedEnv.Name`
+/// for env hooks, `WrappedStep.Name` for `onWrapTaskRun`. `None` is used
+/// only by tests that exercise the `WrappedAction.*` portion in isolation.
+///
+/// Errors from `SymbolTable::set` are reported as `SessionError::Runtime`.
+#[allow(clippy::too_many_arguments)]
+fn overlay_wrapped_action_symbols(
+    symtab: &mut SymbolTable,
+    wrapped: Option<WrappedContext<'_>>,
+    wrapped_command: &str,
+    wrapped_args: &[String],
+    wrapped_environment: &[String],
+    wrapped_timeout_secs: Option<i64>,
+    wrapped_cancelation_mode: Option<&str>,
+    wrapped_cancelation_notify_period: Option<i64>,
+) -> Result<(), SessionError> {
+    match wrapped {
+        Some(WrappedContext::Env(name)) => {
+            set_string_symbol(symtab, "WrappedEnv.Name", name)?;
+        }
+        Some(WrappedContext::Step(name)) => {
+            set_string_symbol(symtab, "WrappedStep.Name", name)?;
+        }
+        None => {}
+    }
+    set_string_symbol(symtab, "WrappedAction.Command", wrapped_command)?;
+    set_string_list_symbol(symtab, "WrappedAction.Args", wrapped_args)?;
+    set_string_list_symbol(symtab, "WrappedAction.Environment", wrapped_environment)?;
+    set_optional_int_symbol(symtab, "WrappedAction.Timeout", wrapped_timeout_secs)?;
+    set_optional_string_symbol(
+        symtab,
+        "WrappedAction.Cancelation.Mode",
+        wrapped_cancelation_mode,
+    )?;
+    set_optional_int_symbol(
+        symtab,
+        "WrappedAction.Cancelation.NotifyPeriodInSeconds",
+        wrapped_cancelation_notify_period,
+    )?;
+    Ok(())
+}
+
+fn set_string_symbol(
+    symtab: &mut SymbolTable,
+    name: &str,
+    value: &str,
+) -> Result<(), SessionError> {
+    symtab
+        .set(name, openjd_expr::ExprValue::String(value.into()))
+        .map_err(|e| SessionError::Runtime(format!("Failed to set {name}: {e}")))
+}
+
+fn set_optional_string_symbol(
+    symtab: &mut SymbolTable,
+    name: &str,
+    value: Option<&str>,
+) -> Result<(), SessionError> {
+    let expr = match value {
+        Some(v) => openjd_expr::ExprValue::String(v.into()),
+        None => openjd_expr::ExprValue::Null,
+    };
+    symtab
+        .set(name, expr)
+        .map_err(|e| SessionError::Runtime(format!("Failed to set {name}: {e}")))
+}
+
+fn set_string_list_symbol(
+    symtab: &mut SymbolTable,
+    name: &str,
+    values: &[String],
+) -> Result<(), SessionError> {
+    let list: Vec<openjd_expr::ExprValue> = values
+        .iter()
+        .map(|s| openjd_expr::ExprValue::String(s.clone()))
+        .collect();
+    let value = openjd_expr::ExprValue::make_list(list, openjd_expr::ExprType::STRING)
+        .map_err(|e| SessionError::Runtime(format!("make_list({name}): {e}")))?;
+    symtab
+        .set(name, value)
+        .map_err(|e| SessionError::Runtime(format!("Failed to set {name}: {e}")))
+}
+
+/// Set a symbol with type `int?`: an integer when `Some`, `null` when
+/// `None`. Used for `WrappedAction.Cancelation.NotifyPeriodInSeconds`,
+/// where `null` is the RFC 0008 sentinel for "not applicable" (the mode
+/// is `TERMINATE` or the wrapped action defined no `<Cancelation>`).
+fn set_optional_int_symbol(
+    symtab: &mut SymbolTable,
+    name: &str,
+    value: Option<i64>,
+) -> Result<(), SessionError> {
+    let expr = match value {
+        Some(v) => openjd_expr::ExprValue::Int(v),
+        None => openjd_expr::ExprValue::Null,
+    };
+    symtab
+        .set(name, expr)
+        .map_err(|e| SessionError::Runtime(format!("Failed to set {name}: {e}")))
 }
 
 impl Drop for Session {
@@ -1890,5 +2846,189 @@ impl Drop for Session {
                 let _ = std::fs::remove_dir_all(&self.working_directory);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod wrap_actions_tests {
+    //! Unit tests for the small pure helpers that back RFC 0008 wrap-hook
+    //! dispatch. Behavioral end-to-end coverage lives in
+    //! `tests/integration/test_wrap_actions.rs`.
+    use super::*;
+    use openjd_expr::ExprValue;
+    use openjd_model::format_string::FormatString;
+    use openjd_model::job::{Action, EnvironmentActions, EnvironmentScript};
+
+    fn fs(s: &str) -> FormatString {
+        FormatString::new(s).unwrap()
+    }
+
+    fn echo() -> Action {
+        Action {
+            command: fs("echo"),
+            args: None,
+            timeout: None,
+            cancelation: None,
+        }
+    }
+
+    fn env_with_actions(name: &str, actions: EnvironmentActions) -> Environment {
+        Environment {
+            name: name.to_string(),
+            description: None,
+            script: Some(EnvironmentScript {
+                let_bindings: None,
+                actions,
+                embedded_files: None,
+            }),
+            variables: None,
+            resolved_symtab: None,
+        }
+    }
+
+    fn empty_actions() -> EnvironmentActions {
+        EnvironmentActions {
+            on_enter: None,
+            on_wrap_env_enter: None,
+            on_wrap_task_run: None,
+            on_wrap_env_exit: None,
+            on_exit: None,
+        }
+    }
+
+    #[test]
+    fn env_has_any_wrap_hook_returns_false_for_plain_env() {
+        let env = env_with_actions(
+            "Plain",
+            EnvironmentActions {
+                on_enter: Some(echo()),
+                on_exit: Some(echo()),
+                ..empty_actions()
+            },
+        );
+        assert!(!env_has_any_wrap_hook(&env));
+    }
+
+    #[test]
+    fn env_has_any_wrap_hook_returns_true_for_each_hook() {
+        for actions in [
+            EnvironmentActions {
+                on_wrap_env_enter: Some(echo()),
+                ..empty_actions()
+            },
+            EnvironmentActions {
+                on_wrap_task_run: Some(echo()),
+                ..empty_actions()
+            },
+            EnvironmentActions {
+                on_wrap_env_exit: Some(echo()),
+                ..empty_actions()
+            },
+        ] {
+            let env = env_with_actions("Wrap", actions);
+            assert!(env_has_any_wrap_hook(&env));
+        }
+    }
+
+    #[test]
+    fn env_has_any_wrap_hook_returns_false_when_script_missing() {
+        let env = Environment {
+            name: "NoScript".into(),
+            description: None,
+            script: None,
+            variables: None,
+            resolved_symtab: None,
+        };
+        assert!(!env_has_any_wrap_hook(&env));
+    }
+
+    #[test]
+    fn overlay_sets_wrapped_action_symbols_for_task_hook() {
+        let mut symtab = SymbolTable::default();
+        overlay_wrapped_action_symbols(
+            &mut symtab,
+            Some(WrappedContext::Step("MyStep")),
+            "echo",
+            &["a".into(), "b c".into()],
+            &["FOO=bar".into()],
+            Some(42),
+            Some("NOTIFY_THEN_TERMINATE"),
+            Some(45),
+        )
+        .unwrap();
+
+        assert_eq!(
+            symtab.get_value("WrappedAction.Command"),
+            Some(&ExprValue::String("echo".into()))
+        );
+        assert_eq!(
+            symtab.get_value("WrappedAction.Timeout"),
+            Some(&ExprValue::Int(42))
+        );
+        // WrappedStep.Name is set for task hooks; WrappedEnv.Name is not.
+        assert_eq!(
+            symtab.get_value("WrappedStep.Name"),
+            Some(&ExprValue::String("MyStep".into()))
+        );
+        assert!(symtab.get_value("WrappedEnv.Name").is_none());
+        // Cancelation.* forwarded verbatim from the overlay arguments.
+        assert_eq!(
+            symtab.get_value("WrappedAction.Cancelation.Mode"),
+            Some(&ExprValue::String("NOTIFY_THEN_TERMINATE".into()))
+        );
+        assert_eq!(
+            symtab.get_value("WrappedAction.Cancelation.NotifyPeriodInSeconds"),
+            Some(&ExprValue::Int(45))
+        );
+    }
+
+    #[test]
+    fn overlay_sets_wrapped_env_name_when_provided() {
+        let mut symtab = SymbolTable::default();
+        overlay_wrapped_action_symbols(
+            &mut symtab,
+            Some(WrappedContext::Env("InnerEnv")),
+            "true",
+            &[],
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            symtab.get_value("WrappedEnv.Name"),
+            Some(&ExprValue::String("InnerEnv".into()))
+        );
+        assert!(symtab.get_value("WrappedStep.Name").is_none());
+    }
+
+    #[test]
+    fn overlay_handles_empty_args_and_environment() {
+        let mut symtab = SymbolTable::default();
+        overlay_wrapped_action_symbols(&mut symtab, None, "true", &[], &[], None, None, None)
+            .unwrap();
+        // Both lists must be set as empty list[string] so iteration in wrap
+        // scripts (`for a in {{ ... }}`) sees zero iterations rather than
+        // "Undefined variable".
+        assert!(symtab.get_value("WrappedAction.Args").is_some());
+        assert!(symtab.get_value("WrappedAction.Environment").is_some());
+        // int?: null when the wrapped action specified no timeout.
+        assert_eq!(
+            symtab.get_value("WrappedAction.Timeout"),
+            Some(&ExprValue::Null)
+        );
+        // Cancelation values for "no <Cancelation>": null Mode, null
+        // NotifyPeriodInSeconds. This locks in the RFC 0008 string?/int?
+        // semantics.
+        assert_eq!(
+            symtab.get_value("WrappedAction.Cancelation.Mode"),
+            Some(&ExprValue::Null)
+        );
+        assert_eq!(
+            symtab.get_value("WrappedAction.Cancelation.NotifyPeriodInSeconds"),
+            Some(&ExprValue::Null)
+        );
     }
 }

@@ -381,22 +381,34 @@ pub fn validate_single_environment(
     if let Some(script) = &env.script {
         let script_path = path_field(path, "script");
         let actions_path = path_field(&script_path, "actions");
-        if script.actions.on_enter.is_none() {
+        // Base 2023-09 requires `onEnter` whenever a `script` is present.
+        // RFC 0008 relaxes this: when `WRAP_ACTIONS` is enabled, an env may
+        // define only wrap hooks (or any single action) without a standalone
+        // `onEnter`. Concretely, require at least one of the five known
+        // actions to be present so we don't accept an empty `actions: {}`.
+        if rules.wrap_actions_enabled {
+            // RFC 0008: an env may define only wrap hooks (or any single
+            // action) without a standalone `onEnter`. Require at least one of
+            // the five known actions so an empty `actions: {}` is still
+            // rejected. The all-or-nothing wrap-hook rule (defining any wrap
+            // hook requires all three) is enforced separately in
+            // `wrap_actions.rs`, not here.
+            if !script.actions.has_any_action() {
+                errors.add(
+                    &actions_path,
+                    "must define at least one of onEnter or onExit, or the complete set of wrap hooks (onWrapEnvEnter, onWrapTaskRun, and onWrapEnvExit together).",
+                );
+            }
+        } else if script.actions.on_enter.is_none() {
+            // Preserve the original wording when the extension is not enabled
+            // so pre-RFC error messages don't change. `on_enter.is_none()`
+            // also covers the empty-`actions` case.
             errors.add(&actions_path, "onEnter is required.");
         }
-        if let Some(action) = &script.actions.on_enter {
+        for (name, action) in script.actions.iter_named() {
             validate_action(
                 action,
-                &path_field(&actions_path, "onEnter"),
-                limits,
-                rules,
-                errors,
-            );
-        }
-        if let Some(action) = &script.actions.on_exit {
-            validate_action(
-                action,
-                &path_field(&actions_path, "onExit"),
+                &path_field(&actions_path, name),
                 limits,
                 rules,
                 errors,
@@ -447,10 +459,32 @@ fn validate_action(
             }
         }
     }
-    if let Some(CancelationMode::NotifyThenTerminate {
-        notify_period_in_seconds: Some(period),
-    }) = &action.cancelation
-    {
+    // A format-string `mode` (CancelationMode::DeferredMode) defers the
+    // TERMINATE-vs-NOTIFY_THEN_TERMINATE decision to run time. It is gated
+    // on FEATURE_BUNDLE_1 (the same extension that admits format strings
+    // into the other literal-typed Action fields). Any format string is
+    // permitted; the resolved value must be one of the two mode names at
+    // run time (Template Schemas §5.3), with whole-field expressions
+    // additionally allowed to resolve to null (dropping the object).
+    if let Some(CancelationMode::DeferredMode { .. }) = &action.cancelation {
+        if !rules.allow_fmtstring_in_numeric_fields {
+            errors.add(
+                path,
+                "a format string in cancelation mode requires the FEATURE_BUNDLE_1 extension.",
+            );
+        }
+    }
+    let notify_period = match &action.cancelation {
+        Some(CancelationMode::NotifyThenTerminate {
+            notify_period_in_seconds: Some(period),
+        }) => Some(period),
+        Some(CancelationMode::DeferredMode {
+            notify_period_in_seconds: Some(period),
+            ..
+        }) => Some(period),
+        _ => None,
+    };
+    if let Some(period) = notify_period {
         let raw = period.raw().trim();
         if !period.has_complex_expressions() && !raw.contains("{{") {
             match raw.parse::<i64>() {
@@ -913,7 +947,7 @@ fn validate_embedded_files(
             }
         }
         if let Some(filename) = &f.filename {
-            let fname = filename.raw();
+            let fname = filename.as_str();
             if fname.is_empty() {
                 errors.add(&path_field(&f_path, "filename"), "must not be empty.");
             }

@@ -93,13 +93,13 @@ impl FunctionLibrary {
     /// // as unresolved type-check stubs.
     /// let profile = ExprProfile::current().with_host_context(HostContext::Unresolved);
     /// let lib = FunctionLibrary::for_profile(&profile);
-    /// assert!(lib.host_context_enabled);
+    /// assert!(!lib.get_signatures("apply_path_mapping").is_empty());
     ///
     /// // Runtime library with real path mapping rules.
     /// let profile = ExprProfile::current()
     ///     .with_host_context(HostContext::with_rules(Vec::new()));
     /// let lib = FunctionLibrary::for_profile(&profile);
-    /// assert!(lib.host_context_enabled);
+    /// assert!(!lib.get_signatures("apply_path_mapping").is_empty());
     /// ```
     pub fn for_profile(profile: &ExprProfile) -> Arc<FunctionLibrary> {
         // Fast path: look up the skeleton (no-host or unresolved-host)
@@ -114,7 +114,6 @@ impl FunctionLibrary {
                 // the caller below.
                 let mut skeleton = build_library_skeleton(profile);
                 if matches!(key.host_kind, HostKind::Unresolved) {
-                    skeleton.host_context_enabled = true;
                     register_unresolved_host_context_functions(&mut skeleton);
                 }
                 Arc::new(skeleton)
@@ -144,7 +143,6 @@ impl FunctionLibrary {
             // The clone is cheap — `FunctionLibrary` holds `Arc<dyn Fn>`
             // entries in its `HashMap`.
             let mut derived = (*base).clone();
-            derived.host_context_enabled = true;
             register_host_context_functions(&mut derived, Arc::clone(rules));
             return Arc::new(derived);
         }
@@ -302,21 +300,21 @@ fn comparison() -> FunctionLibrary {
     lib.register_sig("__ge__", "(T1, T2) -> bool", ge_generic)
         .expect("bad builtin signature");
     // Containment — container first, item second
-    lib.register_sig("__contains__", "(list[T1], T1) -> bool", contains_list)
+    lib.register_sig("__contains__", "(list[T1], T2) -> bool", contains_list)
         .expect("bad builtin signature");
-    lib.register_sig("__contains__", "(range_expr, int) -> bool", contains_range)
+    lib.register_sig("__contains__", "(range_expr, T1) -> bool", contains_range)
         .expect("bad builtin signature");
     lib.register_sig("__contains__", "(string, string) -> bool", contains_string)
         .expect("bad builtin signature");
     lib.register_sig(
         "__not_contains__",
-        "(list[T1], T1) -> bool",
+        "(list[T1], T2) -> bool",
         not_contains_list,
     )
     .expect("bad builtin signature");
     lib.register_sig(
         "__not_contains__",
-        "(range_expr, int) -> bool",
+        "(range_expr, T1) -> bool",
         not_contains_range,
     )
     .expect("bad builtin signature");
@@ -1135,7 +1133,6 @@ mod tests {
             HostContext::with_rules(Vec::<crate::path_mapping::PathMappingRule>::new()),
         ));
         assert!(!lib.get_signatures("apply_path_mapping").is_empty());
-        assert!(lib.host_context_enabled);
     }
 }
 
@@ -1156,7 +1153,6 @@ mod for_profile_tests {
         assert!(!lib.get_signatures("upper").is_empty());
         // No host context → no apply_path_mapping.
         assert!(lib.get_signatures("apply_path_mapping").is_empty());
-        assert!(!lib.host_context_enabled);
     }
 
     #[test]
@@ -1164,7 +1160,6 @@ mod for_profile_tests {
         let profile = ExprProfile::current().with_host_context(HostContext::Unresolved);
         let lib = FunctionLibrary::for_profile(&profile);
         assert!(!lib.get_signatures("apply_path_mapping").is_empty());
-        assert!(lib.host_context_enabled);
     }
 
     #[test]
@@ -1177,7 +1172,6 @@ mod for_profile_tests {
         let profile = ExprProfile::current().with_host_context(HostContext::with_rules(vec![rule]));
         let lib = FunctionLibrary::for_profile(&profile);
         assert!(!lib.get_signatures("apply_path_mapping").is_empty());
-        assert!(lib.host_context_enabled);
     }
 
     #[test]

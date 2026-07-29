@@ -31,6 +31,10 @@ mod test_expr_parameters;
 mod test_feature_bundle_1;
 #[path = "integration/test_host_requirements.rs"]
 mod test_host_requirements;
+#[path = "integration/test_job_cancelation_serde.rs"]
+mod test_job_cancelation_serde;
+#[path = "integration/test_job_eq_hash.rs"]
+mod test_job_eq_hash;
 #[path = "integration/test_job_parameters.rs"]
 mod test_job_parameters;
 #[path = "integration/test_job_template.rs"]
@@ -41,6 +45,8 @@ mod test_let_bindings;
 mod test_merge_job_parameters;
 #[path = "integration/test_misc_v2023_09.rs"]
 mod test_misc_v2023_09;
+#[path = "integration/test_model_profile.rs"]
+mod test_model_profile;
 #[path = "integration/test_parameter_space.rs"]
 mod test_parameter_space;
 #[path = "integration/test_parse.rs"]
@@ -69,3 +75,5 @@ mod test_template_public_api;
 mod test_template_variables;
 #[path = "integration/test_template_windows_paths.rs"]
 mod test_template_windows_paths;
+#[path = "integration/test_wrap_actions.rs"]
+mod test_wrap_actions;

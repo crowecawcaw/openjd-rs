@@ -231,6 +231,7 @@ Additional per-module caps (see each module section below):
 - `format_string::MAX_FORMAT_STRING_LEN` (1 MB)
 - `format_string::MAX_FORMAT_STRING_SEGMENTS` (1,000)
 - `range_expr::MAX_RANGE_EXPR_CHUNKS` (10,000)
+- `range_expr::MAX_RANGE_VALUE_MAGNITUDE` (2^62 — value-domain bound, not a heap cap)
 - `symbol_table::MAX_SYMBOL_TABLE_ENTRIES` (100,000 — transport-only)
 
 All caps are orders of magnitude above any legitimate usage and exist to
@@ -392,9 +393,6 @@ pub struct FunctionEntry {
 #[derive(Clone, Default)]
 pub struct FunctionLibrary {
     /* functions: private */
-    /// True if this library has any host-context functions registered
-    /// (today: `apply_path_mapping`).
-    pub host_context_enabled: bool,
 }
 
 impl FunctionLibrary {
@@ -847,8 +845,10 @@ impl SymbolTable {
     pub fn contains(&self, key: &str) -> bool;
     pub fn keys(&self) -> impl Iterator<Item = &str>;
 
-    /// Collect every leaf path in the table, each prefixed with
-    /// `"{prefix}."` (use `""` for a top-level walk).
+    /// Collect every leaf path in the table in lexicographic order,
+    /// each prefixed with `"{prefix}."` (use `""` for a top-level walk).
+    /// The sort makes serialization canonical: identical tables always
+    /// produce identical transport bytes.
     pub fn all_paths(&self, prefix: &str) -> Vec<String>;
 
     /// Recursively merge `other` into `self`, with leaves from `other`
@@ -877,8 +877,15 @@ session scope (host-native paths). The session crate stores instances
 of this on resolved job structures; at runtime, the session deserializes
 with `PathFormat::host()` so path separators match the worker OS.
 
+Equality and hashing are structural over the JSON transport value. This
+is well-defined because `SymbolTable`'s `Serialize` impl emits entries
+in canonical (lexicographic) path order. Float entries carry their
+preserved original literal in transport form, so tables built from
+`1.0` vs `1.00` compare unequal here even though the corresponding
+`ExprValue`s compare equal.
+
 ```rust
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct SerializedSymbolTable(serde_json::Value);
 
@@ -999,8 +1006,9 @@ impl FormatString {
 }
 
 impl std::fmt::Display for FormatString;  // displays the raw source
-impl PartialEq for FormatString;
+impl PartialEq for FormatString;          // compares the raw source only
 impl Eq for FormatString;
+impl std::hash::Hash for FormatString;    // hashes the raw source only
 impl<'de> serde::Deserialize<'de> for FormatString;  // accepts str/int/float/bool
 ```
 
@@ -1087,6 +1095,9 @@ pub struct IntRange { /* start, end, step: private */ }
 
 impl IntRange {
     pub fn new(start: i64, end: i64, step: i64) -> Result<Self, ExpressionError>;
+    pub fn start(&self) -> i64;
+    pub fn end(&self) -> i64;
+    pub fn step(&self) -> i64;
     pub fn len(&self) -> usize;
     pub fn is_empty(&self) -> bool;
     pub fn contains(&self, value: i64) -> bool;
@@ -1094,6 +1105,18 @@ impl IntRange {
     pub fn get(&self, index: usize) -> Option<i64>;
 }
 ```
+
+`new` errors on a zero step, a direction/step mismatch, or any
+endpoint/step whose magnitude is at or beyond `MAX_RANGE_VALUE_MAGNITUDE`
+(integer overflow error). With values bounded, all derived arithmetic —
+counts, index products, normalization — is exactly representable in
+i64/u64 on every target; see `range-expr.md` (Value Bounds).
+
+Fields are private so the construction invariants (`start <= end`,
+`step > 0`, bounded magnitudes) hold for every live value: read access
+is via `start()`/`end()`/`step()`, `Deserialize` re-validates through
+`new`, and `RangeExpr::from_ranges` re-normalizes its inputs the same
+way.
 
 ```rust
 /// A sorted set of non-overlapping integer ranges. Represents the
@@ -1109,13 +1132,21 @@ Maximum chunk count:
 /// may contain. 10,000 is two orders of magnitude above any realistic
 /// shot-list submission.
 pub const range_expr::MAX_RANGE_EXPR_CHUNKS: usize = 10_000;
+
+/// Exclusive bound on range endpoint/step magnitudes (2^62). Values at
+/// or beyond this raise an integer overflow error at construction; the
+/// bounded domain keeps all derived arithmetic exactly representable in
+/// 64 bits (see range-expr.md, Value Bounds). Re-exported at the crate
+/// root (downstream crates validate against it, e.g. openjd-model's
+/// CHUNK[INT] list checks).
+pub const range_expr::MAX_RANGE_VALUE_MAGNITUDE: i64;
 ```
 
 Construction + inspection:
 
 ```rust
 impl RangeExpr {
-    pub fn from_values(values: Vec<i64>) -> Self;
+    pub fn from_values(values: Vec<i64>) -> Result<Self, ExpressionError>;
     pub fn from_ranges(ranges: Vec<IntRange>) -> Result<Self, ExpressionError>;
 
     /// Display mode: when true, single-element ranges render as
@@ -1128,7 +1159,7 @@ impl RangeExpr {
     pub fn contains(&self, value: i64) -> bool;
     pub fn get(&self, index: i64) -> Option<i64>;
     pub fn ranges(&self) -> &[IntRange];
-    pub fn cumulative_lengths(&self) -> &[usize];
+    pub fn cumulative_lengths(&self) -> &[u64];
     pub fn iter(&self) -> impl Iterator<Item = i64> + '_;
     pub fn to_vec(&self) -> Vec<i64>;
 
@@ -1392,7 +1423,7 @@ pub use format_string::{
 pub use function_library::{EvalContext, FunctionLibrary};
 pub use path_mapping::{PathFormat, PathMappingRule};
 pub use profile::{ExprExtension, ExprProfile, ExprRevision, HostContext};
-pub use range_expr::{RangeExpr, RangeExprError, MAX_RANGE_EXPR_CHUNKS};
+pub use range_expr::{RangeExpr, RangeExprError, MAX_RANGE_EXPR_CHUNKS, MAX_RANGE_VALUE_MAGNITUDE};
 pub use symbol_table::{
     SerializedSymbolTable, SymbolTable, SymbolTableError, MAX_SYMBOL_TABLE_ENTRIES,
 };

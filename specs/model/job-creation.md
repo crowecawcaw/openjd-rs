@@ -75,7 +75,7 @@ pub struct PathParameterOptions<'a> {
 - User-provided relative paths joined to `current_working_dir`
 - Default relative paths joined to `job_template_dir`
 - URI paths (`s3://`, `https://`) preserved as-is when EXPR extension is enabled
-- `allow_template_dir_walk_up` controls whether paths can traverse above `job_template_dir`
+- `allow_template_dir_walk_up` controls whether paths can traverse above `job_template_dir`. When `false`, a default is rejected unless its normalized form is `job_template_dir` itself or a descendant. Containment is checked per path component, not by raw string prefix.
 
 **Value coercion:**
 - `coerce_from_str` — Parses string input (CLI): numeric parsing, boolean aliases
@@ -118,7 +118,9 @@ calling this function.
    - Host requirement values (amounts min/max, attribute values)
    - Parameter space ranges (evaluate range expressions, resolve FormatString ranges)
    - Step-level let bindings
-3. Carry forward session/task-scope fields as FormatString
+3. Carry forward session/task-scope fields as FormatString (plus action
+   `timeout`/`notifyPeriodInSeconds`, which validate in template scope but
+   resolve on the worker)
 4. With EXPR extension: inject `Job.Name` and `Step.Name` into symbol table
 5. Convert environments from template to job types
 6. Build step dependency list

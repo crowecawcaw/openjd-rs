@@ -264,6 +264,13 @@ fn convert_action(a: &template::Action) -> job::Action {
             } => job::CancelationMode::NotifyThenTerminate {
                 notify_period_in_seconds: notify_period_in_seconds.clone(),
             },
+            template::CancelationMode::DeferredMode {
+                mode,
+                notify_period_in_seconds,
+            } => job::CancelationMode::DeferredMode {
+                mode: mode.clone(),
+                notify_period_in_seconds: notify_period_in_seconds.clone(),
+            },
         }),
     }
 }
@@ -312,6 +319,9 @@ pub fn convert_environment_with_symtab(
             let_bindings: s.let_bindings.clone(),
             actions: job::EnvironmentActions {
                 on_enter: s.actions.on_enter.as_ref().map(convert_action),
+                on_wrap_env_enter: s.actions.on_wrap_env_enter.as_ref().map(convert_action),
+                on_wrap_task_run: s.actions.on_wrap_task_run.as_ref().map(convert_action),
+                on_wrap_env_exit: s.actions.on_wrap_env_exit.as_ref().map(convert_action),
                 on_exit: s.actions.on_exit.as_ref().map(convert_action),
             },
             embedded_files: s
@@ -443,11 +453,14 @@ pub fn evaluate_let_bindings(
 // ── Host-context symbol table filtering ─────────────────────────────
 //
 // `resolved_symtab` is transported to the worker host that runs the job.
-// The host only evaluates host-context (SESSION/TASK scope) format strings,
-// so we filter the full symbol table down to exactly the symbols those
-// format strings reference.
+// The host evaluates the format strings that remain unresolved after job
+// creation, so we filter the full symbol table down to exactly the symbols
+// those format strings reference. Most of these are host-context
+// (SESSION/TASK scope); action `timeout`/`notifyPeriodInSeconds` are
+// template scope (validation restricts them to job-creation-stage symbols)
+// but also resolve on the worker, so their references are included too.
 //
-// Step and Environment have different sets of host-context format strings:
+// Step and Environment have different sets of these format strings:
 //   Step  — step-level let bindings, script (actions, embedded files,
 //           script-level let bindings), and step-scoped environments
 //           (variables, actions, embedded files).
@@ -484,19 +497,25 @@ fn filter_symtab_for_step(
         if let Some(t) = &s.actions.on_run.timeout {
             t.copy_used_symtab_values(full, &mut filtered);
         }
-        if let Some(job::CancelationMode::NotifyThenTerminate {
-            notify_period_in_seconds: Some(n),
-        }) = &s.actions.on_run.cancelation
-        {
-            n.copy_used_symtab_values(full, &mut filtered);
+        match &s.actions.on_run.cancelation {
+            Some(job::CancelationMode::NotifyThenTerminate {
+                notify_period_in_seconds: Some(n),
+            }) => n.copy_used_symtab_values(full, &mut filtered),
+            Some(job::CancelationMode::DeferredMode {
+                mode,
+                notify_period_in_seconds,
+            }) => {
+                mode.copy_used_symtab_values(full, &mut filtered);
+                if let Some(n) = notify_period_in_seconds {
+                    n.copy_used_symtab_values(full, &mut filtered);
+                }
+            }
+            _ => {}
         }
         if let Some(files) = &s.embedded_files {
             for f in files {
                 if let Some(d) = &f.data {
                     d.copy_used_symtab_values(full, &mut filtered);
-                }
-                if let Some(n) = &f.filename {
-                    n.copy_used_symtab_values(full, &mut filtered);
                 }
             }
         }
@@ -518,9 +537,6 @@ fn filter_symtab_for_step(
                     for f in files {
                         if let Some(d) = &f.data {
                             d.copy_used_symtab_values(full, &mut filtered);
-                        }
-                        if let Some(n) = &f.filename {
-                            n.copy_used_symtab_values(full, &mut filtered);
                         }
                     }
                 }
@@ -585,6 +601,21 @@ fn collect_all_accessed_symbols(
         if let Some(t) = &a.timeout {
             collect_from_fs(t, out);
         }
+        match &a.cancelation {
+            Some(job::CancelationMode::NotifyThenTerminate {
+                notify_period_in_seconds: Some(n),
+            }) => collect_from_fs(n, out),
+            Some(job::CancelationMode::DeferredMode {
+                mode,
+                notify_period_in_seconds,
+            }) => {
+                collect_from_fs(mode, out);
+                if let Some(n) = notify_period_in_seconds {
+                    collect_from_fs(n, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     if let Some(bindings) = step_let_bindings {
@@ -600,19 +631,10 @@ fn collect_all_accessed_symbols(
 
     if let Some(s) = script {
         collect_from_action(&s.actions.on_run, &mut symbols);
-        if let Some(job::CancelationMode::NotifyThenTerminate {
-            notify_period_in_seconds: Some(n),
-        }) = &s.actions.on_run.cancelation
-        {
-            collect_from_fs(n, &mut symbols);
-        }
         if let Some(files) = &s.embedded_files {
             for f in files {
                 if let Some(d) = &f.data {
                     collect_from_fs(d, &mut symbols);
-                }
-                if let Some(n) = &f.filename {
-                    collect_from_fs(n, &mut symbols);
                 }
             }
         }
@@ -636,19 +658,13 @@ fn collect_all_accessed_symbols(
                 }
             }
             if let Some(es) = &env.script {
-                for action in [&es.actions.on_enter, &es.actions.on_exit]
-                    .into_iter()
-                    .flatten()
-                {
+                for action in es.actions.iter_actions() {
                     collect_from_action(action, &mut symbols);
                 }
                 if let Some(files) = &es.embedded_files {
                     for f in files {
                         if let Some(d) = &f.data {
                             collect_from_fs(d, &mut symbols);
-                        }
-                        if let Some(n) = &f.filename {
-                            collect_from_fs(n, &mut symbols);
                         }
                     }
                 }
@@ -681,7 +697,7 @@ fn collect_env_action_refs(
     full: &SymbolTable,
     filtered: &mut SymbolTable,
 ) {
-    for action in [&actions.on_enter, &actions.on_exit].into_iter().flatten() {
+    for action in actions.iter_actions() {
         action.command.copy_used_symtab_values(full, filtered);
         if let Some(args) = &action.args {
             for a in args {
@@ -690,6 +706,26 @@ fn collect_env_action_refs(
         }
         if let Some(t) = &action.timeout {
             t.copy_used_symtab_values(full, filtered);
+        }
+        match &action.cancelation {
+            Some(job::CancelationMode::NotifyThenTerminate {
+                notify_period_in_seconds: Some(n),
+            }) => n.copy_used_symtab_values(full, filtered),
+            // A deferred (format-string) cancelation mode and its period are
+            // resolved at run time; their referenced symbols must survive the
+            // filter or resolution fails with "Undefined variable". Keep in
+            // sync with collect_env_accessed_symbols below, which collects
+            // the same fields for the RawParam.* fallback pass.
+            Some(job::CancelationMode::DeferredMode {
+                mode,
+                notify_period_in_seconds,
+            }) => {
+                mode.copy_used_symtab_values(full, filtered);
+                if let Some(n) = notify_period_in_seconds {
+                    n.copy_used_symtab_values(full, filtered);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -708,9 +744,6 @@ fn filter_symtab_for_environment(env: &job::Environment, full: &SymbolTable) -> 
                 if let Some(d) = &f.data {
                     d.copy_used_symtab_values(full, &mut filtered);
                 }
-                if let Some(n) = &f.filename {
-                    n.copy_used_symtab_values(full, &mut filtered);
-                }
             }
         }
         if let Some(bindings) = &es.let_bindings {
@@ -722,7 +755,8 @@ fn filter_symtab_for_environment(env: &job::Environment, full: &SymbolTable) -> 
     filtered
 }
 
-/// Collect all symbol names accessed by an environment's host-context format strings.
+/// Collect all symbol names accessed by an environment's worker-resolved
+/// format strings (host-context fields plus template-scope timeouts).
 fn collect_env_accessed_symbols(env: &job::Environment) -> std::collections::HashSet<String> {
     let mut symbols = std::collections::HashSet::new();
     if let Some(vars) = &env.variables {
@@ -731,10 +765,7 @@ fn collect_env_accessed_symbols(env: &job::Environment) -> std::collections::Has
         }
     }
     if let Some(es) = &env.script {
-        for action in [&es.actions.on_enter, &es.actions.on_exit]
-            .into_iter()
-            .flatten()
-        {
+        for action in es.actions.iter_actions() {
             symbols.extend(action.command.accessed_symbols());
             if let Some(args) = &action.args {
                 for fs in args {
@@ -744,14 +775,31 @@ fn collect_env_accessed_symbols(env: &job::Environment) -> std::collections::Has
             if let Some(t) = &action.timeout {
                 symbols.extend(t.accessed_symbols());
             }
+            match &action.cancelation {
+                Some(job::CancelationMode::NotifyThenTerminate {
+                    notify_period_in_seconds: Some(n),
+                }) => symbols.extend(n.accessed_symbols()),
+                // Deferred (format-string) cancelation fields resolve at run
+                // time; their symbols feed include_raw_param_fallbacks so a
+                // PATH/LIST[PATH] Param.* referenced only here still gets its
+                // RawParam.* fallback in the filtered symtab. Keep in sync
+                // with collect_env_action_refs above.
+                Some(job::CancelationMode::DeferredMode {
+                    mode,
+                    notify_period_in_seconds,
+                }) => {
+                    symbols.extend(mode.accessed_symbols());
+                    if let Some(n) = notify_period_in_seconds {
+                        symbols.extend(n.accessed_symbols());
+                    }
+                }
+                _ => {}
+            }
         }
         if let Some(files) = &es.embedded_files {
             for f in files {
                 if let Some(d) = &f.data {
                     symbols.extend(d.accessed_symbols());
-                }
-                if let Some(n) = &f.filename {
-                    symbols.extend(n.accessed_symbols());
                 }
             }
         }

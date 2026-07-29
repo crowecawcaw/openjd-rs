@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// can add new file types (for example, a `Binary` variant, which has
 /// been reserved space in the spec since RFC 0001 discussion) without
 /// a SemVer break for downstream crates that match on this enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[non_exhaustive]
 pub enum FileType {
@@ -38,7 +38,7 @@ impl fmt::Display for FileType {
 }
 
 /// End-of-line mode for embedded files (FEATURE_BUNDLE_1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EndOfLine {
     Lf,
@@ -99,6 +99,17 @@ impl fmt::Display for DataFlow {
 #[non_exhaustive]
 pub enum SpecificationRevision {
     V2023_09,
+}
+
+impl SpecificationRevision {
+    /// The current revision. Equivalent to the most recent variant.
+    pub const CURRENT: SpecificationRevision = SpecificationRevision::V2023_09;
+}
+
+impl Default for SpecificationRevision {
+    fn default() -> Self {
+        SpecificationRevision::CURRENT
+    }
 }
 
 impl fmt::Display for SpecificationRevision {
@@ -347,6 +358,9 @@ pub enum ModelExtension {
     RedactedEnvVars,
     FeatureBundle1,
     Expr,
+    /// `WRAP_ACTIONS` — enables `onWrapEnvEnter`, `onWrapTaskRun`, and
+    /// `onWrapEnvExit` on `<EnvironmentActions>`. See RFC 0008.
+    WrapActions,
 }
 
 impl ModelExtension {
@@ -357,6 +371,7 @@ impl ModelExtension {
         Self::RedactedEnvVars,
         Self::FeatureBundle1,
         Self::Expr,
+        Self::WrapActions,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -365,6 +380,7 @@ impl ModelExtension {
             Self::RedactedEnvVars => "REDACTED_ENV_VARS",
             Self::FeatureBundle1 => "FEATURE_BUNDLE_1",
             Self::Expr => "EXPR",
+            Self::WrapActions => "WRAP_ACTIONS",
         }
     }
 }
@@ -377,6 +393,7 @@ impl std::str::FromStr for ModelExtension {
             "REDACTED_ENV_VARS" => Ok(Self::RedactedEnvVars),
             "FEATURE_BUNDLE_1" => Ok(Self::FeatureBundle1),
             "EXPR" => Ok(Self::Expr),
+            "WRAP_ACTIONS" => Ok(Self::WrapActions),
             _ => Err(format!("Unknown extension: {s}")),
         }
     }
@@ -455,6 +472,32 @@ impl ModelProfile {
         }
     }
 
+    /// Shortcut for `ModelProfile::new(SpecificationRevision::CURRENT)`.
+    ///
+    /// Builds a profile with the current revision and *no* extensions. Use
+    /// this when you want a stable baseline: future crate versions that ship
+    /// a new revision will change what [`SpecificationRevision::CURRENT`]
+    /// points to, but the extension set will remain explicitly empty.
+    pub fn current() -> Self {
+        Self::new(SpecificationRevision::CURRENT)
+    }
+
+    /// Build a profile at the current revision *with every known extension
+    /// enabled*.
+    ///
+    /// **This profile is intentionally unstable across crate versions.** As
+    /// new variants are added to [`ModelExtension::ALL`] and new revisions
+    /// land at [`SpecificationRevision::CURRENT`], the set of enabled
+    /// features grows. For behavior stable across crate versions, construct
+    /// a profile with an explicit revision and extension set via
+    /// [`ModelProfile::new`] or [`ModelProfile::current`].
+    pub fn latest() -> Self {
+        Self {
+            revision: SpecificationRevision::CURRENT,
+            extensions: ModelExtension::ALL.iter().copied().collect(),
+        }
+    }
+
     /// Set the enabled extensions (replaces any existing set).
     #[must_use]
     pub fn with_extensions(mut self, extensions: Extensions) -> Self {
@@ -514,6 +557,12 @@ impl ModelProfile {
         openjd_expr::ExprProfile::new(revision)
             .with_extensions(extensions)
             .with_host_context(host_context)
+    }
+}
+
+impl Default for ModelProfile {
+    fn default() -> Self {
+        Self::current()
     }
 }
 
@@ -803,5 +852,40 @@ mod tests {
             serde_json::to_string(&v).unwrap(),
             "[\"EXPR\",\"TASK_CHUNKING\"]"
         );
+    }
+
+    #[test]
+    fn specification_revision_current_is_v2023_09() {
+        assert_eq!(
+            SpecificationRevision::CURRENT,
+            SpecificationRevision::V2023_09
+        );
+    }
+
+    #[test]
+    fn model_profile_current_has_current_revision_and_no_extensions() {
+        let p = ModelProfile::current();
+        assert_eq!(p.revision(), SpecificationRevision::CURRENT);
+        assert!(p.extensions().is_empty());
+    }
+
+    #[test]
+    fn model_profile_latest_enables_all_extensions() {
+        let p = ModelProfile::latest();
+        assert_eq!(p.revision(), SpecificationRevision::CURRENT);
+        for ext in ModelExtension::ALL {
+            assert!(
+                p.has_extension(*ext),
+                "ModelProfile::latest() must enable every extension in ModelExtension::ALL; missing {ext:?}"
+            );
+        }
+        assert_eq!(p.extensions().len(), ModelExtension::ALL.len());
+    }
+
+    #[test]
+    fn model_profile_default_is_current() {
+        let p = ModelProfile::default();
+        assert_eq!(p.revision(), SpecificationRevision::CURRENT);
+        assert!(p.extensions().is_empty());
     }
 }

@@ -26,10 +26,12 @@ use crate::types::{ModelExtension, ValidationContext};
 /// Build a symbol table containing Param/RawParam entries from job parameter definitions.
 /// RawParam.* is always STRING for PATH types and LIST_STRING for LIST_PATH types,
 /// matching Python behavior where RawParam holds the raw unprocessed value.
-fn build_param_symtab(jt: &JobTemplate) -> SymbolTable {
+/// Takes a parameter slice (not a whole template) so both job templates and
+/// environment templates can use it.
+fn build_param_symtab(params: Option<&[JobParameterDefinition]>) -> SymbolTable {
     use crate::types::JobParameterType;
     let mut symtab = SymbolTable::new();
-    if let Some(params) = &jt.parameter_definitions {
+    if let Some(params) = params {
         for p in params {
             let pt = p.job_param_type();
             let expr_type = pt.expr_type();
@@ -55,12 +57,16 @@ fn build_param_symtab(jt: &JobTemplate) -> SymbolTable {
     symtab
 }
 
-/// Build the template-scope symtab (for job name, host requirements, parameter space ranges).
-/// PATH and LIST[PATH] Param.* are excluded (host-only); RawParam.* is always STRING for path types.
-fn build_template_scope_symtab(jt: &JobTemplate) -> SymbolTable {
+/// Build the template-scope symtab (for job name, host requirements, parameter
+/// space ranges, and fields resolved at job creation such as `timeout` and
+/// `notifyPeriodInSeconds`). PATH and LIST[PATH] Param.* are excluded
+/// (host-only); RawParam.* is always STRING for path types. Takes a parameter
+/// slice so it works for both job templates and standalone environment
+/// templates.
+fn build_template_scope_symtab(params: Option<&[JobParameterDefinition]>) -> SymbolTable {
     use crate::types::JobParameterType;
     let mut symtab = SymbolTable::new();
-    if let Some(params) = &jt.parameter_definitions {
+    if let Some(params) = params {
         for p in params {
             let pt = p.job_param_type();
             let expr_type = pt.expr_type();
@@ -92,13 +98,15 @@ fn build_template_scope_symtab(jt: &JobTemplate) -> SymbolTable {
 /// Build the session-scope symtab (for environment scripts/variables).
 /// Contains: Param.*, RawParam.*, Session.*, Env.File.*, let bindings
 /// When `is_step_env` is true, also includes Step.Name (EXPR only).
+/// Takes a parameter slice so it works for both job templates and standalone
+/// environment templates.
 fn build_session_scope_symtab(
-    jt: &JobTemplate,
+    params: Option<&[JobParameterDefinition]>,
     env: &Environment,
     is_step_env: bool,
     expr_active: bool,
 ) -> SymbolTable {
-    let mut symtab = build_param_symtab(jt);
+    let mut symtab = build_param_symtab(params);
     symtab
         .set(
             "Session.WorkingDirectory",
@@ -154,7 +162,7 @@ fn build_task_scope_symtab(
     step: &StepTemplate,
     expr_active: bool,
 ) -> SymbolTable {
-    let mut symtab = build_param_symtab(jt);
+    let mut symtab = build_param_symtab(jt.parameter_definitions.as_deref());
 
     // Session scope
     symtab
@@ -216,7 +224,11 @@ fn build_task_scope_symtab(
         }
     }
 
-    // Task.File.* from step script embedded files
+    // Task.File.* from step script embedded files. In scope for script-level
+    // `let` bindings too: `filename` is a plain string (never an expression),
+    // so the runtime allocates embedded file paths — defining Task.File.* —
+    // before evaluating `let`, mirroring the environment runner's Env.File.*
+    // ordering.
     if let Some(script) = step
         .resolve_syntax_sugar()
         .ok()
@@ -345,7 +357,7 @@ pub fn validate_format_strings(
     let host_lib = openjd_expr::FunctionLibrary::for_profile(&host_profile);
 
     // ── Job name: template scope (Param/RawParam only) ──
-    let template_symtab = build_template_scope_symtab(jt);
+    let template_symtab = build_template_scope_symtab(jt.parameter_definitions.as_deref());
     validate_fs(
         &jt.name,
         &template_symtab,
@@ -359,7 +371,7 @@ pub fn validate_format_strings(
         let step_path = vec![PathElement::Field("steps".into()), PathElement::Index(i)];
         if let Some(hr) = &step.host_requirements {
             // Build a symtab with Param/RawParam + step let bindings
-            let mut hr_symtab = build_template_scope_symtab(jt);
+            let mut hr_symtab = build_template_scope_symtab(jt.parameter_definitions.as_deref());
             if expr_active {
                 hr_symtab
                     .set("Job.Name", ExprValue::unresolved(ExprType::STRING))
@@ -436,17 +448,36 @@ pub fn validate_format_strings(
         }
     }
 
-    // ── Job environments: session scope ──
+    // ── Job environments: session scope (timeouts: template scope) ──
     if let Some(envs) = &jt.job_environments {
         let envs_path = path_field(&[], "jobEnvironments");
+        // Job-creation-scope symtab for env `timeout`/`notifyPeriodInSeconds`:
+        // Param.* (non-PATH), RawParam.*, and Job.Name with EXPR. No
+        // Step.Name (job envs are not attached to a step) and no env-script
+        // let bindings (those are evaluated at session time).
+        let mut env_template_symtab =
+            build_template_scope_symtab(jt.parameter_definitions.as_deref());
+        if expr_active {
+            env_template_symtab
+                .set("Job.Name", ExprValue::unresolved(ExprType::STRING))
+                .expect("symtab");
+        }
         for (i, env) in envs.iter().enumerate() {
-            let mut env_symtab = build_session_scope_symtab(jt, env, false, expr_active);
-            // Evaluate env script let bindings
-            if expr_active {
-                if let Some(script) = &env.script {
-                    if let Some(bindings) = &script.let_bindings {
-                        let let_path =
-                            path_field(&path_field(&path_index(&envs_path, i), "script"), "let");
+            let mut env_symtab = build_session_scope_symtab(
+                jt.parameter_definitions.as_deref(),
+                env,
+                false,
+                expr_active,
+            );
+            // Env script let bindings: validate and evaluate into the symtab
+            // if EXPR, reject if not.
+            if let Some(script) = &env.script {
+                if let Some(bindings) = &script.let_bindings {
+                    let let_path =
+                        path_field(&path_field(&path_index(&envs_path, i), "script"), "let");
+                    if !expr_active {
+                        errors.add(&let_path, "'let' requires the EXPR extension.");
+                    } else {
                         let mut env_let_names = HashSet::new();
                         validate_let_bindings(
                             bindings,
@@ -465,7 +496,10 @@ pub fn validate_format_strings(
                 env,
                 &env_symtab,
                 &host_lib,
+                &env_template_symtab,
+                &template_lib,
                 &path_index(&envs_path, i),
+                expr_active,
                 errors,
             );
         }
@@ -479,7 +513,7 @@ pub fn validate_format_strings(
         if let Some(ps) = &step.parameter_space {
             let ps_path = path_field(&step_path, "parameterSpace");
             let tpd_path = path_field(&ps_path, "taskParameterDefinitions");
-            let mut range_symtab = build_template_scope_symtab(jt);
+            let mut range_symtab = build_template_scope_symtab(jt.parameter_definitions.as_deref());
             if expr_active {
                 range_symtab
                     .set("Job.Name", ExprValue::unresolved(ExprType::STRING))
@@ -584,6 +618,23 @@ pub fn validate_format_strings(
 
         let mut task_symtab = build_task_scope_symtab(jt, step, expr_active);
 
+        // Template-scope symtab for the step's job-creation-stage fields:
+        // Param.* (non-PATH), RawParam.*, and with EXPR Job.Name, Step.Name,
+        // and step-level let bindings — no Session.*, no Task.*. Used for
+        // step let bindings and for `timeout`/`notifyPeriodInSeconds`
+        // (plain @fmtstring: resolved at job creation, before any session
+        // exists).
+        let mut step_template_symtab =
+            build_template_scope_symtab(jt.parameter_definitions.as_deref());
+        if expr_active {
+            step_template_symtab
+                .set("Job.Name", ExprValue::unresolved(ExprType::STRING))
+                .expect("symtab");
+            step_template_symtab
+                .set("Step.Name", ExprValue::unresolved(ExprType::STRING))
+                .expect("symtab");
+        }
+
         // Let bindings: validate and evaluate into symtab if EXPR, reject if not.
         // Step-level let bindings are TEMPLATE scope (template_lib, no Session.*, no PATH Param.*).
         // Script-level let bindings are TASK scope (host_lib).
@@ -592,29 +643,20 @@ pub fn validate_format_strings(
             if !expr_active {
                 errors.add(&let_path, "'let' requires the EXPR extension.");
             } else {
-                // Build a template-scope symtab for step let bindings:
-                // Param.* (non-PATH), RawParam.*, Job.Name, Step.Name — no Session.*, no Task.*
-                let mut step_let_symtab = build_template_scope_symtab(jt);
-                step_let_symtab
-                    .set("Job.Name", ExprValue::unresolved(ExprType::STRING))
-                    .expect("symtab");
-                step_let_symtab
-                    .set("Step.Name", ExprValue::unresolved(ExprType::STRING))
-                    .expect("symtab");
                 let mut step_let_names = HashSet::new();
                 validate_let_bindings(
                     bindings,
                     &let_path,
                     &HashSet::new(),
                     &mut step_let_names,
-                    &mut step_let_symtab,
+                    &mut step_template_symtab,
                     &template_lib,
                     &template_profile,
                     errors,
                 );
                 // Copy evaluated let bindings into task_symtab so script-level code can use them
                 for name in &step_let_names {
-                    if let Some(val) = step_let_symtab.get_value(name) {
+                    if let Some(val) = step_template_symtab.get_value(name) {
                         let _ = task_symtab.set(name, val.clone());
                     }
                 }
@@ -624,7 +666,10 @@ pub fn validate_format_strings(
         if let Some(script) = &step.script {
             let script_path = path_field(&step_path, "script");
 
-            // Script-level let bindings (TASK scope — host_lib)
+            // Script-level let bindings (TASK scope — host_lib). Task.File.*
+            // is in scope: file paths are allocated before `let` evaluation
+            // at runtime (filenames are plain strings, so allocation cannot
+            // depend on `let` values).
             if let Some(bindings) = &script.let_bindings {
                 let let_path = path_field(&script_path, "let");
                 if !expr_active {
@@ -685,24 +730,43 @@ pub fn validate_format_strings(
                 errors,
             );
 
-            // Timeout
+            // Timeout and notifyPeriodInSeconds are plain @fmtstring
+            // (resolved at job creation, before any session exists), so
+            // they validate against the template-scope symtab: no
+            // Session.*, no Task.*, no Env.File.*, no host functions.
             if let Some(timeout) = &script.actions.on_run.timeout {
                 validate_fs(
                     timeout,
-                    &task_symtab,
-                    &host_lib,
+                    &step_template_symtab,
+                    &template_lib,
                     &path_field(&action_path, "timeout"),
                     errors,
                 );
             }
-            if let Some(CancelationMode::NotifyThenTerminate {
-                notify_period_in_seconds: Some(notify),
-            }) = &script.actions.on_run.cancelation
-            {
+            let (mode_fs, notify_fs) = match &script.actions.on_run.cancelation {
+                Some(CancelationMode::NotifyThenTerminate {
+                    notify_period_in_seconds,
+                }) => (None, notify_period_in_seconds.as_ref()),
+                Some(CancelationMode::DeferredMode {
+                    mode,
+                    notify_period_in_seconds,
+                }) => (Some(mode), notify_period_in_seconds.as_ref()),
+                _ => (None, None),
+            };
+            if let Some(mode) = mode_fs {
+                validate_fs(
+                    mode,
+                    &step_template_symtab,
+                    &template_lib,
+                    &path_field(&action_path, "cancelation"),
+                    errors,
+                );
+            }
+            if let Some(notify) = notify_fs {
                 validate_fs(
                     notify,
-                    &task_symtab,
-                    &host_lib,
+                    &step_template_symtab,
+                    &template_lib,
                     &path_field(&action_path, "cancelation"),
                     errors,
                 );
@@ -722,15 +786,8 @@ pub fn validate_format_strings(
                             errors,
                         );
                     }
-                    if let Some(filename) = &f.filename {
-                        validate_fs(
-                            filename,
-                            &task_symtab,
-                            &host_lib,
-                            &path_field(&f_path, "filename"),
-                            errors,
-                        );
-                    }
+                    // `filename` is a plain string per the 2023-09 schema
+                    // (not @fmtstring) — no format-string validation.
                 }
             }
 
@@ -773,10 +830,16 @@ pub fn validate_format_strings(
         }
 
         // Step environments: session scope + step let bindings
+        // (timeouts: template scope, via step_template_symtab)
         if let Some(envs) = &step.step_environments {
             let envs_path = path_field(&step_path, "stepEnvironments");
             for (j, env) in envs.iter().enumerate() {
-                let mut env_symtab = build_session_scope_symtab(jt, env, true, expr_active);
+                let mut env_symtab = build_session_scope_symtab(
+                    jt.parameter_definitions.as_deref(),
+                    env,
+                    true,
+                    expr_active,
+                );
                 // Copy step-level let binding values (already evaluated with inferred types)
                 if expr_active {
                     if let Some(bindings) = &step.let_bindings {
@@ -795,14 +858,15 @@ pub fn validate_format_strings(
                         }
                     }
                 }
-                // Evaluate env script let bindings into env_symtab
+                // Env script let bindings: validate and evaluate into the
+                // symtab if EXPR, reject if not.
                 if let Some(script) = &env.script {
                     if let Some(bindings) = &script.let_bindings {
-                        if expr_active {
-                            let env_let_path = path_field(
-                                &path_field(&path_index(&envs_path, j), "script"),
-                                "let",
-                            );
+                        let env_let_path =
+                            path_field(&path_field(&path_index(&envs_path, j), "script"), "let");
+                        if !expr_active {
+                            errors.add(&env_let_path, "'let' requires the EXPR extension.");
+                        } else {
                             let enclosing: HashSet<String> = step
                                 .let_bindings
                                 .as_ref()
@@ -828,11 +892,17 @@ pub fn validate_format_strings(
                         }
                     }
                 }
+                // `step_template_symtab` carries Job.Name, Step.Name, and
+                // step-level let bindings — all resolved at job creation, so
+                // legitimately visible to env `timeout`/`notifyPeriodInSeconds`.
                 validate_env_format_strings(
                     env,
                     &env_symtab,
                     &host_lib,
+                    &step_template_symtab,
+                    &template_lib,
                     &path_index(&envs_path, j),
+                    expr_active,
                     errors,
                 );
             }
@@ -917,23 +987,141 @@ pub fn validate_format_strings(
     }
 }
 
+/// Format string validation for a standalone environment template.
+///
+/// Scope selection mirrors how job-template environments are validated and
+/// follows the spec's `@fmtstring` stage annotations. The environment body —
+/// `variables`, action `command`/`args`, embedded files (`@fmtstring[host]`) —
+/// is validated in session scope: `Param.*`/`RawParam.*` come from the
+/// template's own `parameterDefinitions`, `Session.*` and `Env.File.*` are
+/// available, and `Job.Name` is added with EXPR (the environment runs inside
+/// some job's session at runtime). Action `timeout` and
+/// `notifyPeriodInSeconds` (plain `@fmtstring`, resolved at job creation) are
+/// validated in template scope instead: no `Session.*`, no `Env.File.*`, no
+/// host functions. `Step.Name` is available in neither scope — an environment
+/// template is not attached to a step.
+pub fn validate_format_strings_environment_template(
+    et: &EnvironmentTemplate,
+    ctx: &ValidationContext,
+    errors: &mut ValidationErrors,
+) {
+    let expr_active = ctx.profile.has_extension(ModelExtension::Expr);
+    let host_profile = ctx
+        .profile
+        .to_expr_profile(openjd_expr::HostContext::Unresolved);
+    let host_lib = openjd_expr::FunctionLibrary::for_profile(&host_profile);
+    let template_profile = ctx.profile.to_expr_profile(openjd_expr::HostContext::None);
+    let template_lib = openjd_expr::FunctionLibrary::for_profile(&template_profile);
+
+    let env = &et.environment;
+    let env_path = vec![PathElement::Field("environment".into())];
+    let mut env_symtab =
+        build_session_scope_symtab(et.parameter_definitions.as_deref(), env, false, expr_active);
+    // Job-creation-scope symtab for `timeout`/`notifyPeriodInSeconds`.
+    let mut env_template_symtab = build_template_scope_symtab(et.parameter_definitions.as_deref());
+    if expr_active {
+        env_template_symtab
+            .set("Job.Name", ExprValue::unresolved(ExprType::STRING))
+            .expect("symtab");
+    }
+
+    // Env script let bindings: validate and evaluate into the symtab if EXPR,
+    // reject if not. Same treatment as environments in a job template.
+    if let Some(script) = &env.script {
+        if let Some(bindings) = &script.let_bindings {
+            let let_path = path_field(&path_field(&env_path, "script"), "let");
+            if !expr_active {
+                errors.add(&let_path, "'let' requires the EXPR extension.");
+            } else {
+                let mut env_let_names = HashSet::new();
+                validate_let_bindings(
+                    bindings,
+                    &let_path,
+                    &HashSet::new(),
+                    &mut env_let_names,
+                    &mut env_symtab,
+                    &host_lib,
+                    &host_profile,
+                    errors,
+                );
+            }
+        }
+    }
+
+    validate_env_format_strings(
+        env,
+        &env_symtab,
+        &host_lib,
+        &env_template_symtab,
+        &template_lib,
+        &env_path,
+        expr_active,
+        errors,
+    );
+
+    // Comprehension loop-variable validation (EXPR only)
+    if expr_active {
+        validate_single_env_comprehensions(env, errors);
+    }
+}
+
 /// Validate format strings within an environment (variables + script actions).
+/// When `expr_active` is false, complex expressions (anything beyond a bare
+/// `{{Name.Path}}` reference) are rejected — the base 2023-09 grammar only
+/// permits dotted-name references.
+///
+/// Two symbol tables are needed because an environment mixes resolution
+/// stages: `command`/`args`/`variables`/embedded-file fields are
+/// `@fmtstring[host]` (session scope — `symtab`/`lib`), while `timeout` and
+/// `notifyPeriodInSeconds` are plain `@fmtstring` (job-creation scope —
+/// `template_symtab`/`template_lib`, no Session.*, no Env.File.*, no host
+/// functions).
+#[allow(clippy::too_many_arguments)]
 fn validate_env_format_strings(
     env: &Environment,
     symtab: &SymbolTable,
     lib: &FunctionLibrary,
+    template_symtab: &SymbolTable,
+    template_lib: &FunctionLibrary,
     path: &[PathElement],
+    expr_active: bool,
     errors: &mut ValidationErrors,
 ) {
     if let Some(vars) = &env.variables {
         let vars_path = path_field(path, "variables");
         for (name, value) in vars {
-            validate_fs(value, symtab, lib, &path_field(&vars_path, name), errors);
+            let var_path = path_field(&vars_path, name);
+            if !expr_active && value.has_complex_expressions() {
+                errors.add(&var_path, "complex expressions require the EXPR extension.");
+            }
+            validate_fs(value, symtab, lib, &var_path, errors);
         }
     }
     if let Some(script) = &env.script {
         let script_path = path_field(path, "script");
         let actions_path = path_field(&script_path, "actions");
+        if !expr_active {
+            for (name, action) in script.actions.iter_named() {
+                let action_path = path_field(&actions_path, name);
+                if action.command.has_complex_expressions() {
+                    errors.add(
+                        &path_field(&action_path, "command"),
+                        "complex expressions require the EXPR extension.",
+                    );
+                }
+                if let Some(args) = &action.args {
+                    let args_path = path_field(&action_path, "args");
+                    for (j, arg) in args.iter().enumerate() {
+                        if arg.has_complex_expressions() {
+                            errors.add(
+                                &path_index(&args_path, j),
+                                "complex expressions require the EXPR extension.",
+                            );
+                        }
+                    }
+                }
+            }
+        }
         if let Some(action) = &script.actions.on_enter {
             validate_action_fs(
                 action,
@@ -942,6 +1130,27 @@ fn validate_env_format_strings(
                 &path_field(&actions_path, "onEnter"),
                 errors,
             );
+        }
+        // RFC 0008: all three wrap hooks see `WrappedAction.*`. `onWrapEnvEnter`
+        // and `onWrapEnvExit` additionally see `WrappedEnv.Name`; `onWrapTaskRun`
+        // additionally sees `WrappedStep.Name`. Referencing these outside the
+        // permitted hook surfaces as a normal "Undefined variable" error.
+        for (hook_name, action_opt, extra) in script.actions.wrap_hooks() {
+            if let Some(action) = action_opt {
+                let mut st = symtab.clone();
+                add_wrapped_action_scope(&mut st);
+                match extra {
+                    WrapHookScope::EnvName => add_wrapped_env_name_scope(&mut st),
+                    WrapHookScope::StepName => add_wrapped_step_name_scope(&mut st),
+                }
+                validate_action_fs(
+                    action,
+                    &st,
+                    lib,
+                    &path_field(&actions_path, hook_name),
+                    errors,
+                );
+            }
         }
         if let Some(action) = &script.actions.on_exit {
             validate_action_fs(
@@ -952,54 +1161,171 @@ fn validate_env_format_strings(
                 errors,
             );
         }
+        // Timeout, cancelation mode (DeferredMode), and
+        // notifyPeriodInSeconds on env actions are @fmtstring fields. On
+        // the plain lifecycle actions they resolve at job creation, before
+        // any session exists, so they validate against the template-scope
+        // symtab. On the RFC 0008 wrap hooks they resolve at run time with
+        // the `WrappedAction.*` variables seeded — that is what makes
+        // round-trip forwarding (`timeout: "{{WrappedAction.Timeout}}"`,
+        // `mode: "{{WrappedAction.Cancelation.Mode}}"`) possible — so they
+        // validate against the wrapped-action scope.
+        let wrap_hook_names: [&str; 3] = ["onWrapEnvEnter", "onWrapTaskRun", "onWrapEnvExit"];
+        for (name, action) in script.actions.iter_named() {
+            let action_path = path_field(&actions_path, name);
+            let scoped_symtab: SymbolTable;
+            let field_symtab: &SymbolTable = if wrap_hook_names.contains(&name) {
+                let mut st = template_symtab.clone();
+                add_wrapped_action_scope(&mut st);
+                scoped_symtab = st;
+                &scoped_symtab
+            } else {
+                template_symtab
+            };
+            if let Some(timeout) = &action.timeout {
+                validate_fs(
+                    timeout,
+                    field_symtab,
+                    template_lib,
+                    &path_field(&action_path, "timeout"),
+                    errors,
+                );
+            }
+            let (mode_fs, notify_fs) = match &action.cancelation {
+                Some(CancelationMode::NotifyThenTerminate {
+                    notify_period_in_seconds,
+                }) => (None, notify_period_in_seconds.as_ref()),
+                Some(CancelationMode::DeferredMode {
+                    mode,
+                    notify_period_in_seconds,
+                }) => (Some(mode), notify_period_in_seconds.as_ref()),
+                _ => (None, None),
+            };
+            if let Some(mode) = mode_fs {
+                validate_fs(
+                    mode,
+                    field_symtab,
+                    template_lib,
+                    &path_field(&action_path, "cancelation"),
+                    errors,
+                );
+            }
+            if let Some(notify) = notify_fs {
+                validate_fs(
+                    notify,
+                    field_symtab,
+                    template_lib,
+                    &path_field(&action_path, "cancelation"),
+                    errors,
+                );
+            }
+        }
         if let Some(files) = &script.embedded_files {
             let files_path = path_field(&script_path, "embeddedFiles");
             for (j, f) in files.iter().enumerate() {
                 let f_path = path_index(&files_path, j);
                 if let Some(data) = &f.data {
-                    validate_fs(data, symtab, lib, &path_field(&f_path, "data"), errors);
+                    let data_path = path_field(&f_path, "data");
+                    if !expr_active && data.has_complex_expressions() {
+                        errors.add(
+                            &data_path,
+                            "complex expressions require the EXPR extension.",
+                        );
+                    }
+                    validate_fs(data, symtab, lib, &data_path, errors);
                 }
-                if let Some(filename) = &f.filename {
-                    validate_fs(
-                        filename,
-                        symtab,
-                        lib,
-                        &path_field(&f_path, "filename"),
-                        errors,
-                    );
-                }
+                // `filename` is a plain string per the 2023-09 schema
+                // (not @fmtstring) — no format-string validation.
             }
         }
     }
 }
 
+/// Augment a session-scope symtab with `WrappedAction.*`, available in
+/// all three wrap hooks (RFC 0008):
+///
+/// - `WrappedAction.Command` — string
+/// - `WrappedAction.Args` — list[string]
+/// - `WrappedAction.Environment` — list[string] (entries of the form `"KEY=value"`)
+/// - `WrappedAction.Timeout` — int? (seconds, or `null` when the wrapped
+///   action specified no timeout)
+/// - `WrappedAction.Cancelation.Mode` — string? (`"TERMINATE"`,
+///   `"NOTIFY_THEN_TERMINATE"`, or `null` when the wrapped action defines
+///   no `<Cancelation>`)
+/// - `WrappedAction.Cancelation.NotifyPeriodInSeconds` — int? (the
+///   effective grace period when the mode is `NOTIFY_THEN_TERMINATE`;
+///   `null` for `TERMINATE` or when no `<Cancelation>` is defined)
+///
+/// The caller has already cloned the session symtab, so we mutate in place.
+fn add_wrapped_action_scope(symtab: &mut SymbolTable) {
+    for (name, ty) in [
+        ("WrappedAction.Command", ExprType::STRING),
+        ("WrappedAction.Args", ExprType::list(ExprType::STRING)),
+        (
+            "WrappedAction.Environment",
+            ExprType::list(ExprType::STRING),
+        ),
+        (
+            "WrappedAction.Timeout",
+            ExprType::union(vec![ExprType::INT, ExprType::NULLTYPE]),
+        ),
+        (
+            "WrappedAction.Cancelation.Mode",
+            ExprType::union(vec![ExprType::STRING, ExprType::NULLTYPE]),
+        ),
+        (
+            "WrappedAction.Cancelation.NotifyPeriodInSeconds",
+            ExprType::union(vec![ExprType::INT, ExprType::NULLTYPE]),
+        ),
+    ] {
+        symtab.set(name, ExprValue::unresolved(ty)).expect("symtab");
+    }
+}
+
+/// Augment with `WrappedEnv.Name`, available only in `onWrapEnvEnter` and
+/// `onWrapEnvExit` (RFC 0008).
+fn add_wrapped_env_name_scope(symtab: &mut SymbolTable) {
+    symtab
+        .set("WrappedEnv.Name", ExprValue::unresolved(ExprType::STRING))
+        .expect("symtab");
+}
+
+/// Augment with `WrappedStep.Name`, available only in `onWrapTaskRun`
+/// (RFC 0008).
+fn add_wrapped_step_name_scope(symtab: &mut SymbolTable) {
+    symtab
+        .set("WrappedStep.Name", ExprValue::unresolved(ExprType::STRING))
+        .expect("symtab");
+}
+
 fn validate_env_comprehensions(envs: &Option<Vec<Environment>>, errors: &mut ValidationErrors) {
     if let Some(envs) = envs {
         for env in envs {
-            if let Some(script) = &env.script {
-                let mut env_let_names: HashSet<String> = HashSet::new();
-                if let Some(bindings) = &script.let_bindings {
-                    for b in bindings {
-                        if let Some(eq) = b.find('=') {
-                            env_let_names.insert(b[..eq].trim().to_string());
-                        }
-                    }
+            validate_single_env_comprehensions(env, errors);
+        }
+    }
+}
+
+fn validate_single_env_comprehensions(env: &Environment, errors: &mut ValidationErrors) {
+    if let Some(script) = &env.script {
+        let mut env_let_names: HashSet<String> = HashSet::new();
+        if let Some(bindings) = &script.let_bindings {
+            for b in bindings {
+                if let Some(eq) = b.find('=') {
+                    env_let_names.insert(b[..eq].trim().to_string());
                 }
-                if !env_let_names.is_empty() {
-                    let path: Vec<PathElement> = vec![];
-                    for action in [&script.actions.on_enter, &script.actions.on_exit]
-                        .into_iter()
-                        .flatten()
-                    {
-                        if let Err(e) = action.command.validate_comprehension_vars(&env_let_names) {
+            }
+        }
+        if !env_let_names.is_empty() {
+            let path: Vec<PathElement> = vec![];
+            for action in script.actions.iter_actions() {
+                if let Err(e) = action.command.validate_comprehension_vars(&env_let_names) {
+                    errors.add(&path, e.to_string());
+                }
+                if let Some(args) = &action.args {
+                    for arg in args {
+                        if let Err(e) = arg.validate_comprehension_vars(&env_let_names) {
                             errors.add(&path, e.to_string());
-                        }
-                        if let Some(args) = &action.args {
-                            for arg in args {
-                                if let Err(e) = arg.validate_comprehension_vars(&env_let_names) {
-                                    errors.add(&path, e.to_string());
-                                }
-                            }
                         }
                     }
                 }

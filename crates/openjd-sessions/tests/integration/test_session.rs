@@ -6,7 +6,8 @@
 
 use openjd_expr::format_string::FormatString;
 use openjd_model::job::{
-    Action, Environment, EnvironmentActions, EnvironmentScript, StepActions, StepScript,
+    Action, CancelationMode, Environment, EnvironmentActions, EnvironmentScript, StepActions,
+    StepScript,
 };
 use openjd_sessions::action::ActionState;
 use openjd_sessions::session::{Session, SessionConfig, SessionState};
@@ -45,6 +46,9 @@ fn env_with_enter(name: &str, cmd: &str, args: Vec<&str>) -> Environment {
             let_bindings: None,
             actions: EnvironmentActions {
                 on_enter: Some(action(cmd, args)),
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: None,
             },
             embedded_files: None,
@@ -292,6 +296,7 @@ async fn test_run_task() {
     let mut s = Session::new_for_test(tmp.path().to_path_buf());
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo task_output"]),
             None,
             None,
@@ -314,6 +319,7 @@ async fn test_run_task_with_env_vars() {
 
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo TASK_VAR=$TASK_VAR"]),
             None,
             None,
@@ -329,7 +335,13 @@ async fn test_run_task_fail_run() {
     let tmp = TempDir::new().unwrap();
     let mut s = Session::new_for_test(tmp.path().to_path_buf());
     let r = s
-        .run_task(&step("sh", vec!["-c", "exit 42"]), None, None, None)
+        .run_task(
+            "test_step",
+            &step("sh", vec!["-c", "exit 42"]),
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(r.state, ActionState::Failed);
@@ -341,9 +353,15 @@ async fn test_no_task_run_after_fail() {
     let tmp = TempDir::new().unwrap();
     let mut s = Session::new_for_test(tmp.path().to_path_buf());
     // First run fails — session becomes "brittle" (ReadyEnding), only exit_environment allowed
-    s.run_task(&step("sh", vec!["-c", "exit 1"]), None, None, None)
-        .await
-        .unwrap();
+    s.run_task(
+        "test_step",
+        &step("sh", vec!["-c", "exit 1"]),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(s.state(), SessionState::ReadyEnding);
 }
 
@@ -373,7 +391,7 @@ async fn test_run_task_with_variables() {
         embedded_files: None,
     };
     let r = s
-        .run_task(&script, Some(&task_params), None, None)
+        .run_task("test_step", &script, Some(&task_params), None, None)
         .await
         .unwrap();
     assert!(r.stdout.contains("hello"));
@@ -403,6 +421,9 @@ async fn test_enter_environment_with_env_vars() {
             let_bindings: None,
             actions: EnvironmentActions {
                 on_enter: Some(action("sh", vec!["-c", "echo ENV_VAR=$ENV_VAR"])),
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: None,
             },
             embedded_files: None,
@@ -459,7 +480,7 @@ async fn test_run_task_command_not_found() {
     let tmp = TempDir::new().unwrap();
     let mut s = Session::new_for_test(tmp.path().to_path_buf());
     let script = step("nonexistent-command-xyz", vec![]);
-    let result = s.run_task(&script, None, None, None).await;
+    let result = s.run_task("test_step", &script, None, None, None).await;
     assert!(result.is_err());
     assert_eq!(s.state(), SessionState::ReadyEnding);
     let status = s
@@ -479,6 +500,9 @@ async fn test_enter_no_action() {
             let_bindings: None,
             actions: EnvironmentActions {
                 on_enter: None,
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: None,
             },
             embedded_files: None,
@@ -526,6 +550,9 @@ async fn test_enter_environment_with_resolved_variables() {
             let_bindings: None,
             actions: EnvironmentActions {
                 on_enter: Some(action("sh", vec!["-c", "echo RESOLVED=$RESOLVED"])),
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: None,
             },
             embedded_files: None,
@@ -550,6 +577,9 @@ async fn test_exit_environment_basic() {
             let_bindings: None,
             actions: EnvironmentActions {
                 on_enter: None,
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: Some(action("sh", vec!["-c", "echo exited"])),
             },
             embedded_files: None,
@@ -575,6 +605,9 @@ async fn test_exit_environment_with_env_vars() {
             let_bindings: None,
             actions: EnvironmentActions {
                 on_enter: None,
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: Some(action("sh", vec!["-c", "echo EXIT_VAR=$EXIT_VAR"])),
             },
             embedded_files: None,
@@ -600,6 +633,7 @@ async fn test_exit_environment_removes_variables() {
 
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo REMOVED_VAR=${REMOVED_VAR:-gone}"]),
             None,
             None,
@@ -621,6 +655,9 @@ async fn test_exit_environment_fail_run() {
             let_bindings: None,
             actions: EnvironmentActions {
                 on_enter: None,
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: Some(action("sh", vec!["-c", "exit 1"])),
             },
             embedded_files: None,
@@ -644,6 +681,7 @@ async fn test_run_task_after_env_exit() {
     // Only process_env vars persist across environment exits.
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo PERSIST=${PERSIST:-no}"]),
             None,
             None,
@@ -667,6 +705,7 @@ async fn test_direct_definition() {
 
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo DIRECT=$DIRECT"]),
             None,
             None,
@@ -692,7 +731,13 @@ async fn test_redefinition_nested() {
     s.enter_environment(&env2, None, None, None).await.unwrap();
 
     let r = s
-        .run_task(&step("sh", vec!["-c", "echo VAR=$VAR"]), None, None, None)
+        .run_task(
+            "test_step",
+            &step("sh", vec!["-c", "echo VAR=$VAR"]),
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(r.stdout.contains("VAR=inner"));
@@ -711,6 +756,7 @@ async fn test_def_via_stdout() {
 
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo STDOUT_VAR=$STDOUT_VAR"]),
             None,
             None,
@@ -737,6 +783,9 @@ async fn test_def_via_stdout_overrides_direct() {
                     "sh",
                     vec!["-c", "echo 'openjd_env: OVERRIDE=from_stdout'"],
                 )),
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: None,
             },
             embedded_files: None,
@@ -748,6 +797,7 @@ async fn test_def_via_stdout_overrides_direct() {
 
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo OVERRIDE=$OVERRIDE"]),
             None,
             None,
@@ -774,6 +824,7 @@ async fn test_undef_via_stdout() {
 
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo TO_UNDEF=${TO_UNDEF:-gone}"]),
             None,
             None,
@@ -804,6 +855,7 @@ async fn test_def_via_redacted_env_stdout() {
 
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo SECRET_KEY=$SECRET_KEY"]),
             None,
             None,
@@ -844,6 +896,7 @@ async fn test_def_via_multi_line_stdout() {
 
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "printf 'FOO=%s\n' \"$FOO\""]),
             None,
             None,
@@ -863,7 +916,13 @@ async fn test_def_via_stdout_set_empty() {
     s.enter_environment(&env, None, None, None).await.unwrap();
 
     let r = s
-        .run_task(&step("sh", vec!["-c", "echo FOO=$FOO"]), None, None, None)
+        .run_task(
+            "test_step",
+            &step("sh", vec!["-c", "echo FOO=$FOO"]),
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(r.stdout.contains("FOO="));
@@ -878,7 +937,13 @@ async fn test_def_via_stdout_set_empty_json() {
     s.enter_environment(&env, None, None, None).await.unwrap();
 
     let r = s
-        .run_task(&step("sh", vec!["-c", "echo FOO=$FOO"]), None, None, None)
+        .run_task(
+            "test_step",
+            &step("sh", vec!["-c", "echo FOO=$FOO"]),
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(r.stdout.contains("FOO="));
@@ -899,6 +964,7 @@ async fn test_def_via_redacted_env_json_stdout() {
     // Without extension, the env var should NOT be set
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo API_KEY=${API_KEY:-not_set}"]),
             None,
             None,
@@ -934,6 +1000,7 @@ async fn test_def_via_redacted_env_with_extension() {
 
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo PASSWORD=$PASSWORD"]),
             None,
             None,
@@ -964,6 +1031,9 @@ async fn test_def_via_redacted_env_with_variables() {
                     "sh",
                     vec!["-c", "echo 'openjd_redacted_env: TOKEN=secret-token'"],
                 )),
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: None,
             },
             embedded_files: None,
@@ -976,6 +1046,7 @@ async fn test_def_via_redacted_env_with_variables() {
     // Without extension, the redacted env should NOT override the direct variable
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo TOKEN=$TOKEN"]),
             None,
             None,
@@ -1009,6 +1080,7 @@ async fn test_multiple_different_redacted_env_vars() {
 
     let r = s
         .run_task(
+            "test_step",
             &step(
                 "sh",
                 vec!["-c", "echo PASSWORD=$PASSWORD; echo PASSWORD2=$PASSWORD2"],
@@ -1282,7 +1354,13 @@ async fn test_redefinition_exit() {
     // Exit inner env — outer value should be restored
     s.exit_environment(&id2, None, true, None).await.unwrap();
     let r = s
-        .run_task(&step("sh", vec!["-c", "echo VAR=$VAR"]), None, None, None)
+        .run_task(
+            "test_step",
+            &step("sh", vec!["-c", "echo VAR=$VAR"]),
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(r.stdout.contains("VAR=outer"));
@@ -1312,6 +1390,7 @@ async fn warmup_shell() {
     let mut s = Session::new_for_test(warmup_tmp.path().to_path_buf());
     let _ = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo warmup; sleep 0.05"]),
             None,
             None,
@@ -1365,7 +1444,9 @@ async fn test_callback_receives_progress_before_completion() {
     // negligible relative to the total runtime.
     let script = step("sh", vec!["-c", "echo 'openjd_progress: 50.0'; sleep 2"]);
     let t0 = std::time::Instant::now();
-    s.run_task(&script, None, None, None).await.unwrap();
+    s.run_task("test_step", &script, None, None, None)
+        .await
+        .unwrap();
     let total = t0.elapsed();
 
     let ts = ts.lock().unwrap();
@@ -1394,7 +1475,9 @@ async fn test_callback_receives_status_before_completion() {
         vec!["-c", "echo 'openjd_status: Rendering frame 1'; sleep 2"],
     );
     let t0 = std::time::Instant::now();
-    s.run_task(&script, None, None, None).await.unwrap();
+    s.run_task("test_step", &script, None, None, None)
+        .await
+        .unwrap();
     let total = t0.elapsed();
 
     let ts = ts.lock().unwrap();
@@ -1449,6 +1532,7 @@ async fn test_run_task_with_per_action_os_env_vars() {
     let extra = HashMap::from([("EXTRA_VAR".to_string(), "extra_value".to_string())]);
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo EXTRA_VAR=$EXTRA_VAR"]),
             None,
             None,
@@ -1484,6 +1568,9 @@ async fn test_exit_environment_with_per_action_os_env_vars() {
             let_bindings: None,
             actions: EnvironmentActions {
                 on_enter: None,
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: Some(action("sh", vec!["-c", "echo EXIT_VAR=$EXIT_VAR"])),
             },
             embedded_files: None,
@@ -1515,6 +1602,7 @@ async fn test_per_action_os_env_vars_override_session_env() {
     let extra = HashMap::from([("MY_VAR".to_string(), "action_value".to_string())]);
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo MY_VAR=$MY_VAR"]),
             None,
             None,
@@ -1533,6 +1621,7 @@ async fn test_per_action_os_env_vars_do_not_persist() {
     let extra = HashMap::from([("EPHEMERAL".to_string(), "yes".to_string())]);
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo EPHEMERAL=$EPHEMERAL"]),
             None,
             None,
@@ -1545,6 +1634,7 @@ async fn test_per_action_os_env_vars_do_not_persist() {
     // Next action without extra env vars should NOT see the variable
     let r = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo EPHEMERAL=${EPHEMERAL:-gone}"]),
             None,
             None,
@@ -1590,7 +1680,10 @@ async fn test_cancel_action_mark_failed() {
     // openjd_env:bad=value (no space after colon) is detected as malformed,
     // causing cancel with mark_action_failed=true.
     let script = step("sh", vec!["-c", "echo 'openjd_env:bad=value'; sleep 10"]);
-    let r = s.run_task(&script, None, None, None).await.unwrap();
+    let r = s
+        .run_task("test_step", &script, None, None, None)
+        .await
+        .unwrap();
     assert_eq!(
         r.state,
         ActionState::Failed,
@@ -1608,7 +1701,10 @@ async fn test_malformed_env_cancels_and_marks_failed() {
     let mut s = Session::new_for_test(tmp.path().to_path_buf());
 
     let script = step("sh", vec!["-c", "echo 'openjd_env:FOO=bar'; sleep 10"]);
-    let r = s.run_task(&script, None, None, None).await.unwrap();
+    let r = s
+        .run_task("test_step", &script, None, None, None)
+        .await
+        .unwrap();
     assert_eq!(r.state, ActionState::Failed);
     assert_eq!(s.state(), SessionState::ReadyEnding);
 
@@ -1624,7 +1720,10 @@ async fn test_malformed_unset_env_cancels_and_marks_failed() {
     let mut s = Session::new_for_test(tmp.path().to_path_buf());
 
     let script = step("sh", vec!["-c", "echo 'openjd_unset_env:FOO'; sleep 10"]);
-    let r = s.run_task(&script, None, None, None).await.unwrap();
+    let r = s
+        .run_task("test_step", &script, None, None, None)
+        .await
+        .unwrap();
     assert_eq!(r.state, ActionState::Failed);
 }
 
@@ -1635,7 +1734,10 @@ async fn test_invalid_env_var_name_cancels_and_marks_failed() {
     let mut s = Session::new_for_test(tmp.path().to_path_buf());
 
     let script = step("sh", vec!["-c", "echo 'openjd_env: 1BAD=value'; sleep 10"]);
-    let r = s.run_task(&script, None, None, None).await.unwrap();
+    let r = s
+        .run_task("test_step", &script, None, None, None)
+        .await
+        .unwrap();
     assert_eq!(r.state, ActionState::Failed);
 }
 
@@ -1761,7 +1863,10 @@ async fn test_run_task_action_timeout_enforced() {
         embedded_files: None,
     };
     let start = std::time::Instant::now();
-    let r = s.run_task(&script, None, None, None).await.unwrap();
+    let r = s
+        .run_task("test_step", &script, None, None, None)
+        .await
+        .unwrap();
     let elapsed = start.elapsed();
     assert_eq!(
         r.state,
@@ -1800,6 +1905,9 @@ async fn test_enter_environment_action_timeout_enforced() {
                     vec!["-c", "echo entering; sleep 30"],
                     "1",
                 )),
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: None,
             },
             embedded_files: None,
@@ -1835,6 +1943,9 @@ async fn test_exit_environment_action_timeout_enforced() {
             let_bindings: None,
             actions: EnvironmentActions {
                 on_enter: Some(action("echo", vec!["entered"])),
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: Some(action_with_timeout(
                     "sh",
                     vec!["-c", "echo exiting; sleep 30"],
@@ -1867,7 +1978,13 @@ async fn test_run_task_no_timeout_still_works() {
     let tmp = TempDir::new().unwrap();
     let mut s = Session::new_for_test(tmp.path().to_path_buf());
     let r = s
-        .run_task(&step("sh", vec!["-c", "echo hello"]), None, None, None)
+        .run_task(
+            "test_step",
+            &step("sh", vec!["-c", "echo hello"]),
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(r.state, ActionState::Success);
@@ -1968,6 +2085,9 @@ async fn test_callback_exit_env_with_script() {
             let_bindings: None,
             actions: EnvironmentActions {
                 on_enter: None,
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: Some(action("sh", vec!["-c", "echo bye"])),
             },
             embedded_files: None,
@@ -2023,9 +2143,15 @@ async fn test_callback_run_task_success() {
     let tmp = TempDir::new().unwrap();
     let log: Arc<Mutex<CbLog>> = Arc::new(Mutex::new(Vec::new()));
     let mut s = Session::with_config(cb_test_config(&tmp, "cb-task-ok", log.clone())).unwrap();
-    s.run_task(&step("sh", vec!["-c", "echo ok"]), None, None, None)
-        .await
-        .unwrap();
+    s.run_task(
+        "test_step",
+        &step("sh", vec!["-c", "echo ok"]),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let log = log.lock().unwrap();
     assert!(!log.is_empty(), "Callback must fire for run_task success");
     assert!(log.iter().any(|(st, _)| *st == ActionState::Success));
@@ -2037,7 +2163,13 @@ async fn test_callback_run_task_failure() {
     let log: Arc<Mutex<CbLog>> = Arc::new(Mutex::new(Vec::new()));
     let mut s = Session::with_config(cb_test_config(&tmp, "cb-task-fail", log.clone())).unwrap();
     let r = s
-        .run_task(&step("sh", vec!["-c", "exit 1"]), None, None, None)
+        .run_task(
+            "test_step",
+            &step("sh", vec!["-c", "exit 1"]),
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(r.state, ActionState::Failed);
@@ -2053,7 +2185,13 @@ async fn test_callback_run_task_command_not_found() {
     let mut s =
         Session::with_config(cb_test_config(&tmp, "cb-task-notfound", log.clone())).unwrap();
     let r = s
-        .run_task(&step("nonexistent-cmd-xyz", vec![]), None, None, None)
+        .run_task(
+            "test_step",
+            &step("nonexistent-cmd-xyz", vec![]),
+            None,
+            None,
+            None,
+        )
         .await;
     assert!(r.is_err());
     let log = log.lock().unwrap();
@@ -2156,7 +2294,7 @@ async fn test_run_task_rejects_ended_state() {
     assert_eq!(s.state(), SessionState::Ended);
 
     let result = s
-        .run_task(&step("echo", vec!["hello"]), None, None, None)
+        .run_task("test_step", &step("echo", vec!["hello"]), None, None, None)
         .await;
     let err = result.unwrap_err().to_string();
     assert!(
@@ -2181,6 +2319,9 @@ async fn test_exit_environment_failure_still_pops_for_lifo() {
             let_bindings: None,
             actions: EnvironmentActions {
                 on_enter: Some(action("sh", vec!["-c", "echo enter2"])),
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: Some(action("sh", vec!["-c", "exit 1"])),
             },
             embedded_files: None,
@@ -2302,7 +2443,13 @@ async fn test_parent_cancel_token_cancels_running_action() {
     });
 
     let _result = s
-        .run_task(&step("sh", vec!["-c", "sleep 30"]), None, None, None)
+        .run_task(
+            "test_step",
+            &step("sh", vec!["-c", "sleep 30"]),
+            None,
+            None,
+            None,
+        )
         .await;
 
     assert_eq!(s.state(), SessionState::ReadyEnding);
@@ -2366,6 +2513,7 @@ async fn test_cancel_action_with_mark_failed() {
 
     let _result = s
         .run_task(
+            "test_step",
             &step("sh", vec!["-c", "echo 'openjd_env:badformat'; sleep 30"]),
             None,
             None,
@@ -2463,6 +2611,9 @@ async fn test_redacted_env_sets_var_with_extension() {
                     "sh",
                     vec!["-c", "echo 'openjd_redacted_env: SECRET=hunter2'"],
                 )),
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: Some(action("sh", vec!["-c", "echo SECRET=${SECRET:-unset}"])),
             },
             embedded_files: None,
@@ -2500,6 +2651,9 @@ async fn test_redacted_env_does_not_set_var_without_extension() {
                     "sh",
                     vec!["-c", "echo 'openjd_redacted_env: SECRET=hunter2'"],
                 )),
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: Some(action("sh", vec!["-c", "echo SECRET=${SECRET:-unset}"])),
             },
             embedded_files: None,
@@ -2531,6 +2685,9 @@ async fn test_redactions_disabled_with_no_profile() {
                     "sh",
                     vec!["-c", "echo 'openjd_redacted_env: SECRET=hunter2'"],
                 )),
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
                 on_exit: Some(action("sh", vec!["-c", "echo SECRET=${SECRET:-unset}"])),
             },
             embedded_files: None,
@@ -2681,6 +2838,188 @@ mod cancel_escalation {
         assert_eq!(msgs[0]["token"].as_str().unwrap(), "AbCdEfGhIjKlMnOpQrStUv",);
         assert_eq!(msgs[0]["cancel"].as_str().unwrap(), "TERMINATE");
     }
+
+    /// `SessionCancelHandle` must deliver the helper pipe command like
+    /// `cancel_action` does. Unlike `cancel_action`, the handle only fires
+    /// when a per-action token is registered, so this drives a real running
+    /// action and cancels it mid-flight from another task.
+    ///
+    /// Note: this covers handle → pipe delivery. Full cancellation of a
+    /// helper-ROUTED subprocess (helper spawned for a cross-user session)
+    /// requires a second OS user and is exercised by the cross-user
+    /// integration tests' environments.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_cancel_writes_notify_command_to_helper_pipe() {
+        let tmp = TempDir::new().unwrap();
+        let mut s = Session::new_for_test(tmp.path().to_path_buf());
+        let writer_path = tmp.path().join("cancel_writer.log");
+        let writer = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&writer_path)
+            .unwrap();
+        s.set_cancel_writer_for_test(writer);
+        s.set_helper_auth_token_for_test("HandleTok123".into());
+
+        // Handle taken after the writer is injected, so it dup's the pipe.
+        let handle = s.cancel_handle();
+        let delivered: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let delivered_clone = delivered.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            *delivered_clone.lock().unwrap() = Some(handle.cancel(None, false));
+        });
+
+        let r = s
+            .run_task("t", &step("sh", vec!["-c", "sleep 30"]), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(r.state, ActionState::Canceled);
+        assert_eq!(*delivered.lock().unwrap(), Some(true));
+
+        let msgs = read_cancel_messages(&writer_path);
+        assert_eq!(
+            msgs.len(),
+            1,
+            "handle must write exactly one cancel command to the helper pipe"
+        );
+        assert_eq!(msgs[0]["cancel"].as_str().unwrap(), "NOTIFY_THEN_TERMINATE");
+        assert_eq!(msgs[0]["notifyPeriodInSeconds"].as_u64().unwrap(), 5);
+        assert_eq!(
+            msgs[0]["token"].as_str().unwrap(),
+            "HandleTok123",
+            "handle pipe command must carry the helper auth token"
+        );
+    }
+
+    /// Urgent cancel (`time_limit = 0`) through the handle writes TERMINATE.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_urgent_cancel_writes_terminate_command_to_helper_pipe() {
+        let tmp = TempDir::new().unwrap();
+        let mut s = Session::new_for_test(tmp.path().to_path_buf());
+        let writer_path = tmp.path().join("cancel_writer.log");
+        let writer = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&writer_path)
+            .unwrap();
+        s.set_cancel_writer_for_test(writer);
+
+        let handle = s.cancel_handle();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            handle.cancel(Some(Duration::from_secs(0)), false);
+        });
+
+        let r = s
+            .run_task("t", &step("sh", vec!["-c", "sleep 30"]), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(r.state, ActionState::Canceled);
+
+        let msgs = read_cancel_messages(&writer_path);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["cancel"].as_str().unwrap(), "TERMINATE");
+        assert!(
+            msgs[0].get("notifyPeriodInSeconds").is_none(),
+            "TERMINATE should not include notifyPeriodInSeconds"
+        );
+    }
+
+    /// A step that declares notifyThenTerminate cancelation with the given
+    /// notify period.
+    fn step_with_ntt_cancel(cmd: &str, args: Vec<&str>, notify_secs: u64) -> StepScript {
+        let mut on_run = action(cmd, args);
+        on_run.cancelation = Some(CancelationMode::NotifyThenTerminate {
+            notify_period_in_seconds: Some(fs(&notify_secs.to_string())),
+        });
+        StepScript {
+            let_bindings: None,
+            actions: StepActions { on_run },
+            embedded_files: None,
+        }
+    }
+
+    /// Drive `sleep 30` as a task and cancel it via the handle with
+    /// `time_limit`, returning the JSON messages written to the injected
+    /// cancel pipe.
+    async fn run_and_handle_cancel(
+        script: &StepScript,
+        time_limit: Option<Duration>,
+    ) -> Vec<serde_json::Value> {
+        let tmp = TempDir::new().unwrap();
+        let mut s = Session::new_for_test(tmp.path().to_path_buf());
+        let writer_path = tmp.path().join("cancel_writer.log");
+        let writer = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&writer_path)
+            .unwrap();
+        s.set_cancel_writer_for_test(writer);
+
+        let handle = s.cancel_handle();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            handle.cancel(time_limit, false);
+        });
+
+        let r = s.run_task("t", script, None, None, None).await.unwrap();
+        assert_eq!(r.state, ActionState::Canceled);
+        read_cancel_messages(&writer_path)
+    }
+
+    /// The declared terminate_delay caps the notify period when the caller's
+    /// time_limit is larger — mirroring the same-user path, which computes
+    /// `time_limit.min(terminate_delay)`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_cancel_caps_notify_period_at_declared_terminate_delay() {
+        let script = step_with_ntt_cancel("sh", vec!["-c", "sleep 30"], 3);
+        let msgs = run_and_handle_cancel(&script, Some(Duration::from_secs(60))).await;
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["cancel"].as_str().unwrap(), "NOTIFY_THEN_TERMINATE");
+        assert_eq!(
+            msgs[0]["notifyPeriodInSeconds"].as_u64().unwrap(),
+            3,
+            "time_limit larger than the declared terminate_delay must be capped at it"
+        );
+    }
+
+    /// A time_limit smaller than the declared terminate_delay wins.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_cancel_smaller_time_limit_wins_over_terminate_delay() {
+        let script = step_with_ntt_cancel("sh", vec!["-c", "sleep 30"], 3);
+        let msgs = run_and_handle_cancel(&script, Some(Duration::from_secs(1))).await;
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["cancel"].as_str().unwrap(), "NOTIFY_THEN_TERMINATE");
+        assert_eq!(msgs[0]["notifyPeriodInSeconds"].as_u64().unwrap(), 1);
+    }
+
+    /// With no time_limit, the declared terminate_delay applies on its own
+    /// (not the legacy 5s default) — matching the same-user path's
+    /// `None => terminate_delay` arm.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_cancel_without_time_limit_uses_declared_terminate_delay() {
+        let script = step_with_ntt_cancel("sh", vec!["-c", "sleep 30"], 8);
+        let msgs = run_and_handle_cancel(&script, None).await;
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["cancel"].as_str().unwrap(), "NOTIFY_THEN_TERMINATE");
+        assert_eq!(
+            msgs[0]["notifyPeriodInSeconds"].as_u64().unwrap(),
+            8,
+            "declared terminate_delay must apply when no time_limit is given"
+        );
+    }
+
+    /// Actions that do not declare notifyThenTerminate keep the legacy
+    /// behavior: the caller's time_limit is used as-is.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_cancel_without_declared_cancelation_passes_time_limit_through() {
+        let script = step("sh", vec!["-c", "sleep 30"]);
+        let msgs = run_and_handle_cancel(&script, Some(Duration::from_secs(60))).await;
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["cancel"].as_str().unwrap(), "NOTIFY_THEN_TERMINATE");
+        assert_eq!(msgs[0]["notifyPeriodInSeconds"].as_u64().unwrap(), 60);
+    }
 }
 
 /// Test Option 1: Session-level test for the cancel race condition.
@@ -2731,7 +3070,13 @@ async fn test_parent_token_cancel_with_external_kill_reports_canceled() {
     parent_token.cancel();
 
     let _result = s
-        .run_task(&step("sh", vec!["-c", "exit 42"]), None, None, None)
+        .run_task(
+            "test_step",
+            &step("sh", vec!["-c", "exit 42"]),
+            None,
+            None,
+            None,
+        )
         .await;
 
     assert_eq!(s.state(), SessionState::ReadyEnding);
@@ -2778,8 +3123,7 @@ async fn test_callback_reports_intermediate_progress() {
 
     // Script prints progress 25 and 75, with a status message
     let result = s
-        .run_task(
-            &step(
+        .run_task("test_step", &step(
                 "sh",
                 vec![
                     "-c",
@@ -2878,7 +3222,10 @@ async fn test_echo_openjd_directives_true_passes_directive_lines_to_log() {
             r#"K=op; J=enjd; printf '%s%s_progress: %s\n' "$K" "$J" 42.0; echo 'echo-on-plain-output'"#,
         ],
     );
-    let r = s.run_task(&script, None, None, None).await.unwrap();
+    let r = s
+        .run_task("test_step", &script, None, None, None)
+        .await
+        .unwrap();
     assert_eq!(r.state, ActionState::Success);
 
     testing_logger::validate(|captured| {
@@ -2917,7 +3264,10 @@ async fn test_echo_openjd_directives_false_suppresses_directive_lines_from_log()
             r#"K=op; J=enjd; printf '%s%s_progress: %s\n' "$K" "$J" 43.0; echo 'echo-off-plain-output'"#,
         ],
     );
-    let r = s.run_task(&script, None, None, None).await.unwrap();
+    let r = s
+        .run_task("test_step", &script, None, None, None)
+        .await
+        .unwrap();
     assert_eq!(r.state, ActionState::Success);
 
     testing_logger::validate(|captured| {
@@ -2981,7 +3331,10 @@ async fn test_echo_openjd_directives_true_redacts_redacted_env_in_log() {
             r#"K=op; J=enjd; A=tops; B=ecret; C=123; printf '%s%s_redacted_env: TOKEN=%s%s%s\n' "$K" "$J" "$A" "$B" "$C""#,
         ],
     );
-    let r = s.run_task(&script, None, None, None).await.unwrap();
+    let r = s
+        .run_task("test_step", &script, None, None, None)
+        .await
+        .unwrap();
     assert_eq!(r.state, ActionState::Success);
 
     testing_logger::validate(|captured| {
@@ -3007,4 +3360,263 @@ async fn test_echo_openjd_directives_true_redacts_redacted_env_in_log() {
             "expected the redacted_env line to show NAME=******** in the log"
         );
     });
+}
+
+// ══════════════════════════════════════════════════════════════
+// SessionCancelHandle — external cancellation while the Session
+// is owned by the thread/task driving the action
+// ══════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_cancel_handle_idle_returns_false() {
+    let tmp = TempDir::new().unwrap();
+    let s = Session::new_for_test(tmp.path().to_path_buf());
+    let handle = s.cancel_handle();
+    assert!(
+        !handle.cancel(None, false),
+        "no action running — cancel must report nothing to cancel"
+    );
+    assert_eq!(s.state(), SessionState::Ready);
+}
+
+#[tokio::test]
+async fn test_cancel_handle_cancels_running_action() {
+    let tmp = TempDir::new().unwrap();
+    let mut s = Session::new_for_test(tmp.path().to_path_buf());
+    let handle = s.cancel_handle();
+
+    let delivered: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+    let delivered_clone = delivered.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        *delivered_clone.lock().unwrap() = Some(handle.cancel(None, false));
+    });
+
+    let r = s
+        .run_task("t", &step("sh", vec!["-c", "sleep 30"]), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(r.state, ActionState::Canceled);
+    assert_eq!(s.state(), SessionState::ReadyEnding);
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        Some(true),
+        "handle must report the cancel as delivered"
+    );
+}
+
+#[tokio::test]
+async fn test_cancel_handle_mark_action_failed() {
+    let tmp = TempDir::new().unwrap();
+    let mut s = Session::new_for_test(tmp.path().to_path_buf());
+    let handle = s.cancel_handle();
+
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        handle.cancel(None, true);
+    });
+
+    let r = s
+        .run_task("t", &step("sh", vec!["-c", "sleep 30"]), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        r.state,
+        ActionState::Failed,
+        "mark_action_failed must report the canceled action as Failed"
+    );
+}
+
+/// The same handle stays usable across actions, and a cancel does not
+/// poison later actions (each action installs a fresh token — unlike the
+/// one-shot `SessionConfig::cancel_token`, whose cancellation is permanent).
+#[tokio::test]
+async fn test_cancel_handle_reusable_across_actions() {
+    let tmp = TempDir::new().unwrap();
+    let mut s = Session::new_for_test(tmp.path().to_path_buf());
+    let handle = s.cancel_handle();
+
+    // Enter two environments (quick onEnter; E1 has a slow onExit).
+    let e2 = env_with_enter("E2", "sh", vec!["-c", "echo enter2"]);
+    let e1 = Environment {
+        name: "E1".into(),
+        description: None,
+        script: Some(EnvironmentScript {
+            let_bindings: None,
+            actions: EnvironmentActions {
+                on_enter: Some(action("sh", vec!["-c", "echo enter1"])),
+                on_exit: Some(action("sh", vec!["-c", "sleep 30"])),
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
+            },
+            embedded_files: None,
+        }),
+        variables: None,
+        resolved_symtab: None,
+    };
+    let id1 = s.enter_environment(&e1, None, None, None).await.unwrap();
+    let id2 = s.enter_environment(&e2, None, None, None).await.unwrap();
+
+    // Action 1: cancel a running task via the handle.
+    let h = s.cancel_handle();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        h.cancel(None, false);
+    });
+    let r = s
+        .run_task("t", &step("sh", vec!["-c", "sleep 30"]), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(r.state, ActionState::Canceled);
+
+    // Action 2 (E2 exit, quick): must run normally after the cancel — the
+    // cancel must not have poisoned subsequent actions.
+    s.exit_environment(&id2, None, true, None).await.unwrap();
+    assert_eq!(
+        s.action_status().unwrap().state,
+        ActionState::Success,
+        "action after a handle cancel must not be born-canceled"
+    );
+
+    // Action 3 (E1 exit, slow): cancel again via the ORIGINAL handle.
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        handle.cancel(None, false);
+    });
+    let _ = s.exit_environment(&id1, None, true, None).await;
+    assert_eq!(
+        s.action_status().unwrap().state,
+        ActionState::Canceled,
+        "the same handle must be reusable for later actions"
+    );
+}
+
+// ══════════════════════════════════════════════════════════════
+// fail_action_setup — failures after the Running transition must
+// produce a terminal Failed status, not wedge the session
+// ══════════════════════════════════════════════════════════════
+
+/// RFC 0008 wrap seeding resolves the wrapped (inner) action's timeout;
+/// an unresolvable expression there previously returned early with the
+/// session stuck in Running forever and nothing logged.
+#[tokio::test]
+async fn test_wrap_seed_failure_reports_failed_action() {
+    let tmp = TempDir::new().unwrap();
+    let statuses: Arc<Mutex<Vec<ActionState>>> = Arc::new(Mutex::new(Vec::new()));
+    let statuses_clone = statuses.clone();
+    let config = SessionConfig {
+        session_id: "wrap-seed-fail".into(),
+        job_parameter_values: HashMap::new(),
+        path_mapping_rules: None,
+        retain_working_dir: false,
+        callback: Some(Box::new(move |_sid, status| {
+            statuses_clone.lock().unwrap().push(status.state);
+        })),
+        os_env_vars: None,
+        session_root_directory: Some(tmp.path().to_path_buf()),
+        user: None,
+        profile: None,
+        cancel_token: None,
+        debug_collect_stdout: true,
+        echo_openjd_directives: true,
+        sticky_bit_policy: openjd_sessions::StickyBitPolicy::Disabled,
+    };
+    let mut s = Session::with_config(config).unwrap();
+
+    // Wrap environment declaring all three wrap hooks.
+    let wrap_env = Environment {
+        name: "WrapEnv".into(),
+        description: None,
+        script: Some(EnvironmentScript {
+            let_bindings: None,
+            actions: EnvironmentActions {
+                on_enter: Some(action("sh", vec!["-c", "echo wrap-enter"])),
+                on_exit: Some(action("sh", vec!["-c", "echo wrap-exit"])),
+                on_wrap_env_enter: Some(action("sh", vec!["-c", "echo wrapped"])),
+                on_wrap_task_run: Some(action("sh", vec!["-c", "echo wrapped"])),
+                on_wrap_env_exit: Some(action("sh", vec!["-c", "echo wrapped"])),
+            },
+            embedded_files: None,
+        }),
+        variables: None,
+        resolved_symtab: None,
+    };
+    s.enter_environment(&wrap_env, None, None, None)
+        .await
+        .unwrap();
+
+    // Inner environment whose onEnter timeout references an undefined
+    // symbol — seeding WrappedAction.Timeout fails during action setup.
+    let inner = Environment {
+        name: "Inner".into(),
+        description: None,
+        script: Some(EnvironmentScript {
+            let_bindings: None,
+            actions: EnvironmentActions {
+                on_enter: Some(Action {
+                    command: fs("sh"),
+                    args: Some(vec![fs("-c"), fs("echo inner")]),
+                    timeout: Some(fs("{{ Param.Missing }}")),
+                    cancelation: None,
+                }),
+                on_exit: None,
+                on_wrap_env_enter: None,
+                on_wrap_task_run: None,
+                on_wrap_env_exit: None,
+            },
+            embedded_files: None,
+        }),
+        variables: None,
+        resolved_symtab: None,
+    };
+
+    let result = s.enter_environment(&inner, None, None, None).await;
+    assert!(result.is_err(), "setup failure must surface as an error");
+
+    // The session must NOT be wedged in Running, and the failure must be
+    // observable through the action status and the callback.
+    assert_eq!(s.state(), SessionState::ReadyEnding);
+    let status = s.action_status().expect("terminal action status");
+    assert_eq!(status.state, ActionState::Failed);
+    let msg = status.fail_message.expect("fail_message must be recorded");
+    assert!(
+        msg.contains("timeout"),
+        "fail_message should identify the failing field, got: {msg}"
+    );
+    assert!(
+        statuses.lock().unwrap().contains(&ActionState::Failed),
+        "callback must observe the Failed transition"
+    );
+}
+
+/// A runner error during dispatch (here: an undefined symbol in the action's
+/// args, which fails command-line resolution inside the runner) must surface
+/// through drive_action's error branch with a recorded `fail_message` — not
+/// as a bare Failed status with no message and nothing logged, and not as a
+/// session wedged in Running.
+#[tokio::test]
+async fn test_runner_resolution_error_records_fail_message() {
+    let tmp = TempDir::new().unwrap();
+    let mut s = Session::new_for_test(tmp.path().to_path_buf());
+
+    let script = step("sh", vec!["-c", "echo {{ No.Such.Symbol }}"]);
+    let result = s.run_task("t", &script, None, None, None).await;
+    assert!(
+        result.is_err(),
+        "resolution failure must surface as an error"
+    );
+
+    assert_eq!(
+        s.state(),
+        SessionState::ReadyEnding,
+        "session must not be wedged in Running"
+    );
+    let status = s.action_status().expect("terminal action status");
+    assert_eq!(status.state, ActionState::Failed);
+    let msg = status.fail_message.expect("fail_message must be recorded");
+    assert!(
+        msg.contains("No.Such.Symbol"),
+        "fail_message should identify the unresolvable symbol, got: {msg}"
+    );
 }

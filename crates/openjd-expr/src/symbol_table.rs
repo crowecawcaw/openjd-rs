@@ -248,9 +248,17 @@ impl SymbolTable {
     ///
     /// If `prefix` is non-empty, each returned path is prefixed with
     /// `"{prefix}."`. Use `""` for a top-level walk.
+    ///
+    /// Paths are returned in lexicographic order. The internal storage is
+    /// a `HashMap` with per-instance-random iteration order; sorting here
+    /// makes every consumer deterministic — in particular the `Serialize`
+    /// impl, whose JSON transport array must have a canonical order so
+    /// that identical tables produce identical bytes (content-addressing,
+    /// caching, byte-level comparison of `resolvedSymTab`).
     pub fn all_paths(&self, prefix: &str) -> Vec<String> {
         let mut out = Vec::new();
         self.collect_paths(prefix, &mut out);
+        out.sort_unstable();
         out
     }
 
@@ -382,7 +390,15 @@ impl<'a> FromIterator<(&'a str, ExprValue)> for SymbolTable {
 ///
 /// This mirrors the real-world flow where a scheduler serializes the symbol
 /// table to JSON and sends it to a worker that may be on a different OS.
-#[derive(Debug, Clone, serde::Serialize)]
+///
+/// Equality and hashing are structural over the JSON transport value.
+/// This is well-defined because `SymbolTable`'s `Serialize` impl emits
+/// entries in canonical (lexicographic) path order, so identical tables
+/// produce identical transport arrays. Note that float entries carry
+/// their preserved original literal in transport form, so tables built
+/// from `1.0` vs `1.00` compare unequal here even though the
+/// corresponding `ExprValue`s compare equal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(transparent)]
 pub struct SerializedSymbolTable(serde_json::Value);
 

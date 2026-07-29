@@ -1412,6 +1412,101 @@ fn test_create_job_resolved_symtab_populated() {
 }
 
 #[test]
+fn env_resolved_symtab_includes_notify_period_refs() {
+    // notifyPeriodInSeconds on an environment action is resolved on the
+    // worker; the symbols it references must survive symtab filtering.
+    let job = parse_and_create(
+        r#"{
+        "specificationVersion": "jobtemplate-2023-09",
+        "extensions": ["FEATURE_BUNDLE_1"],
+        "name": "Test",
+        "parameterDefinitions": [{"name": "Period", "type": "INT", "default": 10}],
+        "jobEnvironments": [{"name": "E", "script": {"actions": {"onEnter": {
+            "command": "echo",
+            "cancelation": {"mode": "NOTIFY_THEN_TERMINATE", "notifyPeriodInSeconds": "{{Param.Period}}"}
+        }}}}],
+        "steps": [{"name": "S", "script": {"actions": {"onRun": {"command": "echo"}}}}]
+    }"#,
+        &[],
+    );
+    let symtab = job.job_environments.as_ref().unwrap()[0]
+        .resolved_symtab
+        .as_ref()
+        .expect("should have resolved_symtab")
+        .to_symtab(openjd_expr::PathFormat::Posix)
+        .unwrap();
+    assert_eq!(
+        symtab.get_value("Param.Period"),
+        Some(&openjd_expr::ExprValue::Int(10)),
+        "Param.Period is referenced by the env action's notifyPeriodInSeconds"
+    );
+}
+
+#[test]
+fn step_env_resolved_symtab_includes_notify_period_refs() {
+    // Same rule for step environments, whose references flow into the
+    // step's resolved_symtab.
+    let job = parse_and_create(
+        r#"{
+        "specificationVersion": "jobtemplate-2023-09",
+        "extensions": ["FEATURE_BUNDLE_1"],
+        "name": "Test",
+        "parameterDefinitions": [{"name": "Period", "type": "INT", "default": 10}],
+        "steps": [{
+            "name": "S",
+            "stepEnvironments": [{"name": "E", "script": {"actions": {"onEnter": {
+                "command": "echo",
+                "cancelation": {"mode": "NOTIFY_THEN_TERMINATE", "notifyPeriodInSeconds": "{{Param.Period}}"}
+            }}}}],
+            "script": {"actions": {"onRun": {"command": "echo"}}}
+        }]
+    }"#,
+        &[],
+    );
+    let symtab = job.steps[0]
+        .resolved_symtab
+        .as_ref()
+        .expect("should have resolved_symtab")
+        .to_symtab(openjd_expr::PathFormat::Posix)
+        .unwrap();
+    assert_eq!(
+        symtab.get_value("Param.Period"),
+        Some(&openjd_expr::ExprValue::Int(10)),
+        "Param.Period is referenced by the step env action's notifyPeriodInSeconds"
+    );
+}
+
+#[test]
+fn env_resolved_symtab_includes_timeout_refs() {
+    // timeout on an environment action follows the same worker-resolution
+    // path as notifyPeriodInSeconds.
+    let job = parse_and_create(
+        r#"{
+        "specificationVersion": "jobtemplate-2023-09",
+        "extensions": ["FEATURE_BUNDLE_1"],
+        "name": "Test",
+        "parameterDefinitions": [{"name": "T", "type": "INT", "default": 30}],
+        "jobEnvironments": [{"name": "E", "script": {"actions": {"onEnter": {
+            "command": "echo", "timeout": "{{Param.T}}"
+        }}}}],
+        "steps": [{"name": "S", "script": {"actions": {"onRun": {"command": "echo"}}}}]
+    }"#,
+        &[],
+    );
+    let symtab = job.job_environments.as_ref().unwrap()[0]
+        .resolved_symtab
+        .as_ref()
+        .expect("should have resolved_symtab")
+        .to_symtab(openjd_expr::PathFormat::Posix)
+        .unwrap();
+    assert_eq!(
+        symtab.get_value("Param.T"),
+        Some(&openjd_expr::ExprValue::Int(30)),
+        "Param.T is referenced by the env action's timeout"
+    );
+}
+
+#[test]
 fn test_create_job_resolved_symtab_always_present() {
     let job = parse_and_create(
         r#"{
@@ -1546,9 +1641,9 @@ fn test_scope_boundary_embedded_file_filename_not_resolved() {
     );
     let files = job.steps[0].script.embedded_files.as_ref().unwrap();
     assert_eq!(
-        files[0].filename.as_ref().unwrap().raw(),
-        "{{Param.Val}}",
-        "EmbeddedFile filename is SESSION/TASK scope — must NOT be resolved during create_job"
+        files[0].filename.as_deref(),
+        Some("{{Param.Val}}"),
+        "EmbeddedFile filename is a plain string (not @fmtstring) — braces are literal text, never resolved"
     );
 }
 
@@ -1665,8 +1760,8 @@ fn test_scope_boundary_env_embedded_files_not_resolved() {
         .embedded_files
         .as_ref()
         .unwrap();
-    assert_eq!(files[0].filename.as_ref().unwrap().raw(), "{{Param.Val}}",
-        "Environment embedded file filename is SESSION scope — must NOT be resolved during create_job");
+    assert_eq!(files[0].filename.as_deref(), Some("{{Param.Val}}"),
+        "Environment embedded file filename is a plain string (not @fmtstring) — braces are literal text, never resolved");
     assert_eq!(
         files[0].data.as_ref().unwrap().raw(),
         "echo {{Param.Val}}",
@@ -4851,4 +4946,270 @@ fn create_job_accepts_list_list_int_within_constraints() {
         },
     );
     openjd_model::create_job(&jt, &params, &jt.default_validation_context()).unwrap();
+}
+
+// ══════════════════════════════════════════════════════════════
+// PATH parameter default normalization
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn path_default_dotdot_normalized_walk_up_true() {
+    let jt = decode_job_template(
+        minimal_job_template(r#"{"name": "P", "type": "PATH", "default": ".."}"#),
+        None,
+        &CallerLimits::default(),
+    )
+    .unwrap();
+    let params = preprocess_job_parameters(
+        &jt,
+        &Default::default(),
+        &[],
+        &openjd_model::PathParameterOptions {
+            job_template_dir: "/tmp/templates/job1",
+            current_working_dir: "/tmp/cwd",
+            path_format: PathFormat::Posix,
+            allow_template_dir_walk_up: true,
+            allow_uri_path_values: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        params["P"].value.to_display_string(),
+        "/tmp/templates",
+        ".. should resolve to parent of template dir"
+    );
+}
+
+#[test]
+fn path_default_dot_slash_dotdot_normalized_walk_up_true() {
+    let jt = decode_job_template(
+        minimal_job_template(r#"{"name": "P", "type": "PATH", "default": "./.."}"#),
+        None,
+        &CallerLimits::default(),
+    )
+    .unwrap();
+    let params = preprocess_job_parameters(
+        &jt,
+        &Default::default(),
+        &[],
+        &openjd_model::PathParameterOptions {
+            job_template_dir: "/tmp/templates/job1",
+            current_working_dir: "/tmp/cwd",
+            path_format: PathFormat::Posix,
+            allow_template_dir_walk_up: true,
+            allow_uri_path_values: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        params["P"].value.to_display_string(),
+        "/tmp/templates",
+        "./.. should resolve to parent of template dir"
+    );
+}
+
+#[test]
+fn path_default_down_up_normalized_walk_up_true() {
+    let jt = decode_job_template(
+        minimal_job_template(r#"{"name": "P", "type": "PATH", "default": "sub/../other"}"#),
+        None,
+        &CallerLimits::default(),
+    )
+    .unwrap();
+    let params = preprocess_job_parameters(
+        &jt,
+        &Default::default(),
+        &[],
+        &openjd_model::PathParameterOptions {
+            job_template_dir: "/tmp/templates/job1",
+            current_working_dir: "/tmp/cwd",
+            path_format: PathFormat::Posix,
+            allow_template_dir_walk_up: true,
+            allow_uri_path_values: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        params["P"].value.to_display_string(),
+        "/tmp/templates/job1/other",
+        "sub/../other should normalize to just other within template dir"
+    );
+}
+
+// ══════════════════════════════════════════════════════════════
+// PATH default walk-up guard: component-aware containment
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn path_default_sibling_escape_rejected_walk_up_false() {
+    // "../job1-sibling" from /tmp/templates/job1 resolves to the SIBLING
+    // /tmp/templates/job1-sibling, which is outside the template dir. A raw
+    // string-prefix check would wrongly accept it; the guard must reject it.
+    let jt = decode_job_template(
+        minimal_job_template(r#"{"name": "P", "type": "PATH", "default": "../job1-sibling"}"#),
+        None,
+        &CallerLimits::default(),
+    )
+    .unwrap();
+    let err = preprocess_job_parameters(
+        &jt,
+        &Default::default(),
+        &[],
+        &openjd_model::PathParameterOptions {
+            job_template_dir: "/tmp/templates/job1",
+            current_working_dir: "/tmp/cwd",
+            path_format: PathFormat::Posix,
+            allow_template_dir_walk_up: false,
+            allow_uri_path_values: false,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "Validation error: The default value of PATH parameter P references a path outside of the template directory. Walking up from the template directory is not permitted."
+    );
+}
+
+#[test]
+fn path_default_prefix_sibling_escape_rejected_walk_up_false() {
+    // "../job10" from /a/job1 resolves to /a/job10, a sibling that shares the
+    // "/a/job1" string prefix but is not inside it.
+    let jt = decode_job_template(
+        minimal_job_template(r#"{"name": "P", "type": "PATH", "default": "../job10"}"#),
+        None,
+        &CallerLimits::default(),
+    )
+    .unwrap();
+    let err = preprocess_job_parameters(
+        &jt,
+        &Default::default(),
+        &[],
+        &openjd_model::PathParameterOptions {
+            job_template_dir: "/a/job1",
+            current_working_dir: "/tmp/cwd",
+            path_format: PathFormat::Posix,
+            allow_template_dir_walk_up: false,
+            allow_uri_path_values: false,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "Validation error: The default value of PATH parameter P references a path outside of the template directory. Walking up from the template directory is not permitted."
+    );
+}
+
+#[test]
+fn path_default_back_to_template_dir_accepted_walk_up_false() {
+    // "sub/.." resolves to exactly the template dir, which is inside it.
+    let jt = decode_job_template(
+        minimal_job_template(r#"{"name": "P", "type": "PATH", "default": "sub/.."}"#),
+        None,
+        &CallerLimits::default(),
+    )
+    .unwrap();
+    let params = preprocess_job_parameters(
+        &jt,
+        &Default::default(),
+        &[],
+        &openjd_model::PathParameterOptions {
+            job_template_dir: "/a/job1",
+            current_working_dir: "/tmp/cwd",
+            path_format: PathFormat::Posix,
+            allow_template_dir_walk_up: false,
+            allow_uri_path_values: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        params["P"].value.to_display_string(),
+        "/a/job1",
+        "sub/.. should resolve to exactly the template dir and be accepted"
+    );
+}
+
+#[test]
+fn path_default_sibling_escape_rejected_windows() {
+    // Same prefix-sibling escape on Windows paths.
+    let jt = decode_job_template(
+        minimal_job_template(r#"{"name": "P", "type": "PATH", "default": "..\\job1-sibling"}"#),
+        None,
+        &CallerLimits::default(),
+    )
+    .unwrap();
+    let err = preprocess_job_parameters(
+        &jt,
+        &Default::default(),
+        &[],
+        &openjd_model::PathParameterOptions {
+            job_template_dir: r"C:\templates\job1",
+            current_working_dir: r"C:\cwd",
+            path_format: PathFormat::Windows,
+            allow_template_dir_walk_up: false,
+            allow_uri_path_values: false,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "Validation error: The default value of PATH parameter P references a path outside of the template directory. Walking up from the template directory is not permitted."
+    );
+}
+
+#[test]
+fn chunk_int_list_value_beyond_range_bound_rejected() {
+    // CHUNK[INT] regroups values into generated RangeExpr chunks, whose
+    // values are bounded to |v| < 2^62. A list range accepts full i64,
+    // so an out-of-bound value must be a clean job-creation error, not
+    // a panic when the chunk is built during iteration.
+    let err = parse_and_create_err(
+        r#"{
+        "specificationVersion": "jobtemplate-2023-09",
+        "extensions": ["TASK_CHUNKING"],
+        "name": "Test",
+        "steps": [{
+            "name": "S",
+            "parameterSpace": {
+                "taskParameterDefinitions": [{
+                    "name": "Frame",
+                    "type": "CHUNK[INT]",
+                    "range": [1, 2, 4611686018427387904],
+                    "chunks": {"defaultTaskCount": 2, "rangeConstraint": "NONCONTIGUOUS"}
+                }]
+            },
+            "script": {"actions": {"onRun": {"command": "echo"}}}
+        }]
+    }"#,
+        &[],
+    );
+    assert_eq!(
+        err,
+        "Validation error: Task parameter 'Frame': value 4611686018427387904 \
+         exceeds the CHUNK[INT] range value bound (magnitude must be below 2^62)"
+    );
+}
+
+#[test]
+fn plain_int_list_value_beyond_range_bound_still_accepted() {
+    // Plain INT list ranges never build RangeExpr chunks; full-i64
+    // values remain valid there.
+    let job = parse_and_create(
+        r#"{
+        "specificationVersion": "jobtemplate-2023-09",
+        "name": "Test",
+        "steps": [{
+            "name": "S",
+            "parameterSpace": {
+                "taskParameterDefinitions": [{
+                    "name": "Frame",
+                    "type": "INT",
+                    "range": [1, 4611686018427387904]
+                }]
+            },
+            "script": {"actions": {"onRun": {"command": "echo"}}}
+        }]
+    }"#,
+        &[],
+    );
+    assert_eq!(job.steps.len(), 1);
 }

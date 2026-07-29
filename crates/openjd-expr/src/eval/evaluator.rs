@@ -11,6 +11,7 @@
 use ruff_python_ast as ast;
 
 use crate::error::{write_caret_line, ExpressionError, ExpressionErrorKind};
+use crate::eval::op_table::OperatorTable;
 use crate::path_mapping::PathFormat;
 use crate::symbol_table::SymbolTable;
 use crate::value::{ExprValue, Float64};
@@ -659,45 +660,7 @@ impl<'a> Evaluator<'a> {
 
     fn eval_binop(&mut self, b: &ast::ExprBinOp) -> Result<ExprValue, ExpressionError> {
         // Reject unsupported operators early
-        let op_name = match b.op {
-            ast::Operator::Add => "__add__",
-            ast::Operator::Sub => "__sub__",
-            ast::Operator::Mult => "__mul__",
-            ast::Operator::Div => "__truediv__",
-            ast::Operator::FloorDiv => "__floordiv__",
-            ast::Operator::Mod => "__mod__",
-            ast::Operator::Pow => "__pow__",
-            ast::Operator::BitAnd => {
-                return Err(ExpressionError::unsupported(
-                    "Bitwise AND (&) is not supported",
-                ))
-            }
-            ast::Operator::BitOr => {
-                return Err(ExpressionError::unsupported(
-                    "Bitwise OR (|) is not supported",
-                ))
-            }
-            ast::Operator::BitXor => {
-                return Err(ExpressionError::unsupported(
-                    "Bitwise XOR (^) is not supported",
-                ))
-            }
-            ast::Operator::LShift => {
-                return Err(ExpressionError::unsupported(
-                    "Left shift (<<) is not supported",
-                ))
-            }
-            ast::Operator::RShift => {
-                return Err(ExpressionError::unsupported(
-                    "Right shift (>>) is not supported",
-                ))
-            }
-            ast::Operator::MatMult => {
-                return Err(ExpressionError::unsupported(
-                    "Matrix multiply (@) is not supported",
-                ))
-            }
-        };
+        let op_name = OperatorTable::current().binop(b.op)?;
 
         let left = self.evaluate_with_target(&b.left, None)?;
         let right = self.evaluate_with_target(&b.right, None)?;
@@ -710,11 +673,8 @@ impl<'a> Evaluator<'a> {
 
     fn eval_unaryop(&mut self, u: &ast::ExprUnaryOp) -> Result<ExprValue, ExpressionError> {
         self.count_op()?;
-        if u.op == ast::UnaryOp::Invert {
-            return Err(ExpressionError::unsupported(
-                "Bitwise NOT (~) is not supported",
-            ));
-        }
+        // Reject unsupported operators early
+        let op_name = OperatorTable::current().unaryop(u.op)?;
         // Fold -<int literal> to handle INT64_MIN which can't be represented
         // as a positive literal followed by negation (matching Python trick)
         if matches!(u.op, ast::UnaryOp::USub) {
@@ -738,12 +698,6 @@ impl<'a> Evaluator<'a> {
             }
         }
         let operand = self.evaluate_with_target(&u.operand, None)?;
-        let op_name = match u.op {
-            ast::UnaryOp::USub => "__neg__",
-            ast::UnaryOp::UAdd => "__pos__",
-            ast::UnaryOp::Not => "__not__",
-            ast::UnaryOp::Invert => unreachable!(),
-        };
         self.dispatch_with_node(op_name, vec![operand], Some(&ast::Expr::UnaryOp(u.clone())))
     }
 
@@ -803,21 +757,10 @@ impl<'a> Evaluator<'a> {
 
     fn eval_compare(&mut self, c: &ast::ExprCompare) -> Result<ExprValue, ExpressionError> {
         self.count_op()?;
-        // Reject is/is not
+        let table = OperatorTable::current();
+        // Reject unsupported operators early
         for op in &c.ops {
-            match op {
-                ast::CmpOp::Is => {
-                    return Err(ExpressionError::unsupported(
-                        "'is' operator is not supported; use '=='",
-                    ))
-                }
-                ast::CmpOp::IsNot => {
-                    return Err(ExpressionError::unsupported(
-                        "'is not' operator is not supported; use '!='",
-                    ))
-                }
-                _ => {}
-            }
+            table.cmpop(*op)?;
         }
         let mut left = self.evaluate_with_target(&c.left, None)?;
         for (op, right_node) in c.ops.iter().zip(c.comparators.iter()) {
@@ -827,26 +770,13 @@ impl<'a> Evaluator<'a> {
                 self.release(&right);
                 return self.track(ExprValue::unresolved(ExprType::BOOL));
             }
-            let (op_name, args) = match op {
-                ast::CmpOp::Eq => ("__eq__", vec![left.clone(), right.clone()]),
-                ast::CmpOp::NotEq => ("__ne__", vec![left.clone(), right.clone()]),
-                ast::CmpOp::Lt => ("__lt__", vec![left.clone(), right.clone()]),
-                ast::CmpOp::LtE => ("__le__", vec![left.clone(), right.clone()]),
-                ast::CmpOp::Gt => ("__gt__", vec![left.clone(), right.clone()]),
-                ast::CmpOp::GtE => ("__ge__", vec![left.clone(), right.clone()]),
-                // For 'in'/'not in', container is first arg (right), item is second (left)
-                ast::CmpOp::In => ("__contains__", vec![right.clone(), left.clone()]),
-                ast::CmpOp::NotIn => ("__not_contains__", vec![right.clone(), left.clone()]),
-                ast::CmpOp::Is => {
-                    return Err(ExpressionError::unsupported(
-                        "'is' operator is not supported; use '=='",
-                    ))
-                }
-                ast::CmpOp::IsNot => {
-                    return Err(ExpressionError::unsupported(
-                        "'is not' operator is not supported; use '!='",
-                    ))
-                }
+            let dispatch = table.cmpop(*op)?;
+            let op_name = dispatch.dunder;
+            // For 'in'/'not in', container is first arg (right), item is second (left)
+            let args = if dispatch.container_first {
+                vec![right.clone(), left.clone()]
+            } else {
+                vec![left.clone(), right.clone()]
             };
 
             // Use the compare expression's range for error caret positioning
@@ -1393,26 +1323,38 @@ impl<'a> Evaluator<'a> {
             return self.track(ExprValue::unresolved(ExprType::list(body_type)));
         }
 
-        // Materialize iterable elements
-        let items: Vec<ExprValue> = if let Some(iter) = iterable.list_iter() {
-            iter.collect()
-        } else if let ExprValue::RangeExpr(r) = &iterable {
-            r.iter().map(ExprValue::Int).collect()
-        } else {
-            return Err(ExpressionError::type_error(format!(
-                "Cannot iterate over {}",
-                iterable.expr_type()
-            )));
-        };
-        self.release(&iterable);
+        // Iterate the iterable in place — lists via a borrowing ListIter
+        // (elements were already tracked when the list was built; each
+        // yielded clone is transient), ranges lazily (a symbolic range's
+        // element count is bounded only by the range value domain, up to
+        // ~2^63, so materializing it up front could not be held to the
+        // memory limit). Neither branch copies the iterable's storage.
+        // The per-item loop below charges +1 op per element for both.
+        let iter: Box<dyn Iterator<Item = ExprValue> + '_> =
+            if let Some(list_iter) = iterable.list_iter() {
+                Box::new(list_iter)
+            } else if let ExprValue::RangeExpr(r) = &iterable {
+                Box::new(r.iter().map(ExprValue::Int))
+            } else {
+                return Err(ExpressionError::type_error(format!(
+                    "Cannot iterate over {}",
+                    iterable.expr_type()
+                )));
+            };
 
-        // Evaluate each element with a child scope
-        let mut result = Vec::new();
+        // Evaluate each element with a child scope. Each iteration's
+        // memory baseline is saved and restored: the child's transients
+        // (loop-variable clones, intermediates) are gone by the loop end,
+        // and the finished list is tracked exactly once by
+        // make_list_checked. BudgetedVec bounds the growing result,
+        // including projected capacity growth, before each push.
+        let mut result = crate::budgeted_vec::BudgetedVec::new();
         let base_symtabs: Vec<&SymbolTable> = self.symtabs.to_vec();
-        for item in &items {
+        for item in iter {
             self.count_op()?;
+            let memory_baseline = self.current_memory;
             let mut tmp = crate::symbol_table::SymbolTable::new();
-            tmp.set(&var_name, item.clone())
+            tmp.set(&var_name, item)
                 .map_err(|e| ExpressionError::new(e.to_string()))?;
             let mut combined = base_symtabs.clone();
             combined.push(&tmp);
@@ -1436,12 +1378,23 @@ impl<'a> Evaluator<'a> {
                 }
             }
             if include {
-                result.push(child.evaluate(&lc.elt)?);
+                let elt = child.evaluate(&lc.elt)?;
+                result.push(self, elt)?;
             }
             self.absorb_counters(&child);
             self.regex_cache = child.regex_cache;
-            self.current_memory = self.current_memory.saturating_sub(item.memory_size());
+            // Restore the iteration baseline: the child's tracked
+            // transients (the loop-variable clone and any intermediates)
+            // do not survive the iteration, and the result elements are
+            // accounted separately by BudgetedVec. Peak memory keeps
+            // the high-water mark absorbed above.
+            self.current_memory = memory_baseline;
         }
+        // The iterable is consumed by the comprehension: release its
+        // tracked memory now that iteration is done (the borrowing
+        // iterators above held it until the loop ended).
+        self.release(&iterable);
+        let result = result.into_vec();
 
         // Check nesting depth
         for e in &result {

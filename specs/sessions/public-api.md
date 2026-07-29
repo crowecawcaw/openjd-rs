@@ -199,6 +199,11 @@ impl Session {
         mark_action_failed: bool,
     ) -> Result<(), SessionError>;
 
+    /// Thread-safe handle for cancelling the running action while the
+    /// `Session` value is owned by the thread driving it. Reusable for
+    /// the life of the session; see session.md § SessionCancelHandle.
+    pub fn cancel_handle(&self) -> SessionCancelHandle;
+
     /// Remove the working directory and associated temp files.
     /// Called automatically on drop as a safety net, but callers
     /// should call it explicitly at the end of a session to surface
@@ -937,6 +942,12 @@ pub enum SessionError {
     /// Tried to exit an environment that wasn't the most recently
     /// entered one.
     LifoViolation { expected: String, got: String },
+
+    /// RFC 0008 single-layer rule: `enter_environment` called with a
+    /// wrap-hook-defining environment while another wrap-defining
+    /// environment is already active. Raised before any state is
+    /// recorded for the rejected environment; the session stays Ready.
+    MultipleWrapEnvironments { existing: String, entering: String },
 }
 ```
 

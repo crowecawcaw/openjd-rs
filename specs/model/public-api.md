@@ -157,6 +157,11 @@ pub fn evaluate_let_bindings(
 ) -> Result<SymbolTable, ModelError>;
 
 pub fn convert_environment(env: &template::Environment) -> job::Environment;
+
+pub fn convert_environment_with_symtab(
+    env: &template::Environment,
+    symtab: Option<&SymbolTable>,
+) -> job::Environment;
 ```
 
 [`create_job`] is the high-level entry point: it resolves the job name
@@ -184,6 +189,15 @@ to its resolved [`job::Environment`] counterpart without running the
 full `create_job` pipeline. This is used by the session runtime when
 it needs a resolved environment shape for an environment template
 that's being entered directly without a parent job.
+
+[`convert_environment_with_symtab`] is the same conversion but freezes
+a filtered copy of the given symbol table into the returned
+environment's `resolved_symtab` — only the symbols the environment's
+own format strings reference are retained (plus `RawParam.*` fallbacks
+for PATH-typed parameters). The CLI uses this for `--environment`
+templates so the environment's own `parameterDefinitions` resolve
+inside its actions and RFC 0008 wrap hooks. Also available via the
+`create_job::` module path.
 
 ## Template Types (Unresolved)
 
@@ -463,6 +477,19 @@ Session- and task-scope strings (in `script.actions`, `variables`,
 embedded file contents, etc.) remain as [`FormatString`] for the session
 runtime to resolve when worker state is available.
 
+All types below implement `Debug`, `Clone`, `PartialEq`, and `Hash`
+with the invariant `a == b ⇒ hash(a) == hash(b)`. Equality is
+structural on the *created job*, not the source template: derived
+state such as `resolved_symtab` participates, and since its transport
+format preserves original float literals, jobs created from `1.0` vs
+`1.00` parameter values compare unequal. Map-typed fields (`IndexMap`,
+`HashMap`) compare order-insensitively and hash as key-sorted entries.
+`f64` fields hash via `to_bits()` after normalizing `-0.0` to `0.0`,
+consistent with `-0.0 == 0.0`. Types whose (transitive) fields include
+`f64` — `Job`, `Step`, `StepParameterSpace`, `TaskParameter`,
+`HostRequirements`, `AmountRequirement` — implement `PartialEq` but
+not `Eq`; the rest also implement `Eq`.
+
 ```rust
 pub struct job::Job {
     pub name: String,
@@ -528,13 +555,22 @@ pub struct job::EnvironmentScript {
 
 pub struct job::EnvironmentActions {
     pub on_enter: Option<Action>,
+    /// RFC 0008 — wraps inner environments' `onEnter` actions. Requires
+    /// the `WRAP_ACTIONS` extension at template-validation time.
+    pub on_wrap_env_enter: Option<Action>,
+    /// RFC 0008 — wraps tasks' `onRun` actions. Requires the
+    /// `WRAP_ACTIONS` extension at template-validation time.
+    pub on_wrap_task_run: Option<Action>,
+    /// RFC 0008 — wraps inner environments' `onExit` actions. Requires
+    /// the `WRAP_ACTIONS` extension at template-validation time.
+    pub on_wrap_env_exit: Option<Action>,
     pub on_exit: Option<Action>,
 }
 
 pub struct job::EmbeddedFile {
     pub name: String,
     pub file_type: FileType,
-    pub filename: Option<FormatString>,
+    pub filename: Option<String>,
     pub data: Option<FormatString>,
     pub runnable: Option<bool>,
     pub end_of_line: Option<EndOfLine>,
@@ -622,6 +658,7 @@ pub enum ModelExtension {
     RedactedEnvVars,   // RFC 0003 — "REDACTED_ENV_VARS"
     FeatureBundle1,    // RFC 0004 — "FEATURE_BUNDLE_1"
     Expr,              // RFC 0005 — "EXPR"
+    WrapActions,       // RFC 0008 — "WRAP_ACTIONS"
 }
 
 impl ModelExtension {
@@ -751,7 +788,7 @@ pub type TaskParameterSet = IndexMap<String, TaskParameterValue>;
 ### Spec-String Enums
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum FileType {
     Text,
@@ -999,7 +1036,9 @@ impl MergedParameterDefinition {
 
 ### `convert_environment_with_symtab`
 
-Available via the `create_job::` module path:
+Re-exported at the crate root (see
+[Entry Points at the Crate Root](#entry-points-at-the-crate-root)) and
+also available via the `create_job::` module path:
 
 ```rust
 /// Convert a template Environment to a job Environment, optionally
