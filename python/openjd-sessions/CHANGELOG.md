@@ -1,3 +1,17 @@
+# Changelog
+
+All notable changes to this crate are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.13.1](https://github.com/OpenJobDescription/openjd-rs/releases/tag/python-openjd-sessions-v0.13.1) - 2026-10-08
+
+### Miscellaneous
+
+- Require openjd-model 0.14.
+- Move the package from openjd-sessions-for-python into the openjd-rs repository, under `python/openjd-sessions`. The version now comes from the package's `Cargo.toml`.
+
 ## 0.13.0 (2026-10-07)
 
 
