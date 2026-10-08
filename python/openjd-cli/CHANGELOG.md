@@ -4,6 +4,13 @@ All notable changes to this crate are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.7.9](https://github.com/crowecawcaw/openjd-rs/compare/python-openjd-cli-v0.7.8...python-openjd-cli-v0.7.9) - 2026-10-08
+
+### Miscellaneous
+
+- Updated the following local packages: openjd-model-py, openjd-sessions-py
+
+
 ## [0.7.8](https://github.com/OpenJobDescription/openjd-rs/releases/tag/python-openjd-cli-v0.7.8) - 2026-10-08
 
 ### Miscellaneous
