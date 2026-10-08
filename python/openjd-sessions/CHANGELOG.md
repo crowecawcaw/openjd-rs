@@ -5,6 +5,494 @@ All notable changes to this crate are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1](https://github.com/crowecawcaw/openjd-rs/releases/tag/python-openjd-sessions-v0.13.1) - 2026-10-08
+
+### Bug fixes
+
+- Render a PATH parameter in the host's path format (OpenJobDescription/openjd-sessions-for-python#364) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Raise openjd-model floor to >= 0.11.4 ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Do not cache failed command lookups ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Address automated review findings on the trusted-path resolver ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Resolve system commands from trusted dirs, not PATH ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Use absolute paths for system commands to prevent PATH injection ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Forward step_name through the _v1 Session.run_task wrapper (OpenJobDescription/openjd-sessions-for-python#345) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Do not load the native extension to build an empty rules list ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Decode subprocess output with errors=backslashreplace (OpenJobDescription/openjd-sessions-for-python#343) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Resolve a legacy non-string argument instead of crashing ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Do not load the native EXPR extension unless EXPR is used ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Send the kill signal before announcing it ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- A failed launch must release wait_until_started() ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Run() must own its child from creation, not after logging ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- WrappedAction.Environment must be session-lifetime (RFC 0008 MUST) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Give _materialize_path_mapping a failure path (openjd-rs parity) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Cancel_info.json handler caught the wrong exception type ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Do not gate terminate on leader liveness (openjd-rs parity) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Anchor the openjd_env near-miss regex (openjd-rs parity) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Poll through CANCELING state to deliver terminal callback (OpenJobDescription/openjd-sessions-for-python#331) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Only allow basenames for embedded files (OpenJobDescription/openjd-sessions-for-python#326) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Notify and cancel windows (OpenJobDescription/openjd-sessions-for-python#245) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Sdist failed to install (OpenJobDescription/openjd-sessions-for-python#240) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Cleanup session dir on windows (OpenJobDescription/openjd-sessions-for-python#241) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- [**breaking**] Use default timeout of 5 minutes for environment exits (OpenJobDescription/openjd-sessions-for-python#213) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Unhandled exception in cancellation workflow (OpenJobDescription/openjd-sessions-for-python#186) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Run Windows Session cleanup at high priority. (OpenJobDescription/openjd-sessions-for-python#173) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Run python instead of pythonservice on windows to signal subprocesses (OpenJobDescription/openjd-sessions-for-python#171) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Session stuck reading on STDOUT stream (OpenJobDescription/openjd-sessions-for-python#162) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Upper case all env vars on Windows (OpenJobDescription/openjd-sessions-for-python#161) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Ensure process exit code is a 32-bit signed integer (OpenJobDescription/openjd-sessions-for-python#148) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- [**breaking**] Windows locate_executable finds wrong binary to run (OpenJobDescription/openjd-sessions-for-python#141) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Eliminate TranslateName usage on Windows systems (OpenJobDescription/openjd-sessions-for-python#144) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Failing to parse openjd_env and openjd_unset_env should fail session action (OpenJobDescription/openjd-sessions-for-python#111) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Restrict handles inherited by win32 subprocess (OpenJobDescription/openjd-sessions-for-python#112) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- [**breaking**] Remove methods from public interface of WindowsSessionUser (OpenJobDescription/openjd-sessions-for-python#91) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Make tempdir create parent dir if nonexistent (OpenJobDescription/openjd-sessions-for-python#86) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Allow openjd_env to set vars to empty (OpenJobDescription/openjd-sessions-for-python#74) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Change default windows working directory to the "C:\ProgramData\Amazon\OpenJD" (OpenJobDescription/openjd-sessions-for-python#63) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add logging for setting environment variables (OpenJobDescription/openjd-sessions-for-python#57) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Parameter name for signal_win_process (OpenJobDescription/openjd-sessions-for-python#40) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Properly delete working dir with Windows impersonation (OpenJobDescription/openjd-sessions-for-python#35) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Make psutil a runtime dependency on Windows (OpenJobDescription/openjd-sessions-for-python#36) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Remove embedded_files.write_file_for_user Windows exception (OpenJobDescription/openjd-sessions-for-python#32) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Make tempdir permissions inherited by descendants on Windows (OpenJobDescription/openjd-sessions-for-python#29) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Package missing signal subprocess shell script (OpenJobDescription/openjd-sessions-for-python#24) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Exporting WindowsSessionUser class (OpenJobDescription/openjd-sessions-for-python#22) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Use psutil to kill the process instead of using taskkill. (OpenJobDescription/openjd-sessions-for-python#18) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Properly cleanup working dir with posix cross-user (OpenJobDescription/openjd-sessions-for-python#13) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- [**breaking**] Updates to path mapping ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Allow subprocess user to be the current user (OpenJobDescription/openjd-sessions-for-python#6) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Remove misleading 'rm' error message (OpenJobDescription/openjd-sessions-for-python#10) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+
+### CI
+
+- Specify permissions that workflows pass to jobs/actions (OpenJobDescription/openjd-sessions-for-python#287) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add changelog section for performance improvements (OpenJobDescription/openjd-sessions-for-python#279) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add pr labeling (OpenJobDescription/openjd-sessions-for-python#258) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Update release workflows (OpenJobDescription/openjd-sessions-for-python#244) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add codeql analysis (OpenJobDescription/openjd-sessions-for-python#158) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add PyPI publish job to publish workflow (OpenJobDescription/openjd-sessions-for-python#127) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add reusable workflows (OpenJobDescription/openjd-sessions-for-python#123) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Change publish project name (OpenJobDescription/openjd-sessions-for-python#122) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Mark test that fails in CodeBuild as xfail (OpenJobDescription/openjd-sessions-for-python#104) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Set release to watch mainline changelog (OpenJobDescription/openjd-sessions-for-python#95) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Remove merge back from release workflow (OpenJobDescription/openjd-sessions-for-python#90) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+
+### Documentation
+
+- Document the Python packages in openjd-rs ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Lower-case the remaining 0.12.0 changelog entry ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Mark the 0.12.0 entry as a breaking release ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Reframe resolver comments around problem and solution ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Explain the ignored ChildProcessError in a test cleanup ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add openjd-rs cross-port checklist to PR template (OpenJobDescription/openjd-sessions-for-python#312) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Python 3.13 and 3.14 (OpenJobDescription/openjd-sessions-for-python#292) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Enhance contributing guidelines to be more accessible (OpenJobDescription/openjd-sessions-for-python#168) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Fix minor issues (OpenJobDescription/openjd-sessions-for-python#75) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+
+### Features
+
+- [**breaking**] Require openjd-model 0.13 (OpenJobDescription/openjd-sessions-for-python#368) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Accept a resolved symbol table on the v0 session (OpenJobDescription/openjd-sessions-for-python#357) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- [**breaking**] Shorten the session working directory name for Windows MAX_PATH (OpenJobDescription/openjd-sessions-for-python#348) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Support running Sessions as a jobRunAsUser on macOS (OpenJobDescription/openjd-sessions-for-python#335) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- RFC 0008 environment wrap actions (OpenJobDescription/openjd-sessions-for-python#333) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Rust-backed openjd.sessions._v1 via PyO3 (OpenJobDescription/openjd-sessions-for-python#316) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Enable Claude PR review ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add support for domain users (OpenJobDescription/openjd-sessions-for-python#311) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add OPENJD_SESSION_WORKING_DIR environment variable (OpenJobDescription/openjd-sessions-for-python#309) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Implement FEATURE_BUNDLE_1 RFC 0004 ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add run_subprocess function to the Session class ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- [**breaking**] Adding support for redacted environment variable values through… (OpenJobDescription/openjd-sessions-for-python#232) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Allow opt-in of running tasks after an env exit ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add ability to not log banner when running a task (OpenJobDescription/openjd-sessions-for-python#204) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Directly signal session action processes using CAP_KILL (OpenJobDescription/openjd-sessions-for-python#196) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- [**breaking**] Update openjd-model to 0.5.* (OpenJobDescription/openjd-sessions-for-python#194) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add log content metadata to log records (OpenJobDescription/openjd-sessions-for-python#175) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Introduce log content on log records (OpenJobDescription/openjd-sessions-for-python#170) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Log process return code on process exit (OpenJobDescription/openjd-sessions-for-python#150) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Support for multi line env variables in enter env (OpenJobDescription/openjd-sessions-for-python#115) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Resolve windows command location prior to run (OpenJobDescription/openjd-sessions-for-python#116) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- [**breaking**] Remove group property from WindowsSessionUser (OpenJobDescription/openjd-sessions-for-python#102) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Sessions can now be run in a Windows Service context (OpenJobDescription/openjd-sessions-for-python#97) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- [**breaking**] Public release (OpenJobDescription/openjd-sessions-for-python#80) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- [**breaking**] Update to openjd-model 0.3.0 (OpenJobDescription/openjd-sessions-for-python#73) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add option to supply location to create Working Directory (OpenJobDescription/openjd-sessions-for-python#56) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- [**breaking**] Unify parameter data shapes with openjd-model (OpenJobDescription/openjd-sessions-for-python#55) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- [**breaking**] Differentiate canceled/timed-out actions (OpenJobDescription/openjd-sessions-for-python#54) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Validate username and password in Windows. (OpenJobDescription/openjd-sessions-for-python#48) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- [**breaking**] Reuse ParameterValueType from model package (OpenJobDescription/openjd-sessions-for-python#49) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Modify logging to be easier to understand (OpenJobDescription/openjd-sessions-for-python#43) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Allow adding env vars when running an action (OpenJobDescription/openjd-sessions-for-python#42) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Support notify feature on Windows. (OpenJobDescription/openjd-sessions-for-python#28) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Export package version (OpenJobDescription/openjd-sessions-for-python#31) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Support session.cleanup() on Windows (OpenJobDescription/openjd-sessions-for-python#26) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Support impersonation in tempdir permissions (OpenJobDescription/openjd-sessions-for-python#21) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Change the Start-Process to Start-Job to support impersonation. (OpenJobDescription/openjd-sessions-for-python#17) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add Windows session user (OpenJobDescription/openjd-sessions-for-python#16) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Import Windows implementation from internal repository (OpenJobDescription/openjd-sessions-for-python#12) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- [**breaking**] Import from internal repository (OpenJobDescription/openjd-sessions-for-python#1) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+
+### Miscellaneous
+
+- Openjd-model 0.14.0, openjd-sessions 0.13.1, openjd-cli 0.7.8 ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.13.0 (OpenJobDescription/openjd-sessions-for-python#369) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.12.1 ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Bump actions/checkout from 4 to 7 (OpenJobDescription/openjd-sessions-for-python#349) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.12.0 ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Pin GitPython for release bump ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- [**breaking**] Raise the openjd-model floor to 0.11.6 ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.11.0 (OpenJobDescription/openjd-sessions-for-python#355) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.10.14 (OpenJobDescription/openjd-sessions-for-python#347) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.10.13 (OpenJobDescription/openjd-sessions-for-python#346) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.10.12 ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.10.11 (OpenJobDescription/openjd-sessions-for-python#340) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Group dependabot PRs (OpenJobDescription/openjd-sessions-for-python#338) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.10.10 (OpenJobDescription/openjd-sessions-for-python#327) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Bump actions/checkout from 6 to 7 (OpenJobDescription/openjd-sessions-for-python#317) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.10.9 (OpenJobDescription/openjd-sessions-for-python#313) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Bump dependabot/fetch-metadata from 2 to 3 (OpenJobDescription/openjd-sessions-for-python#308) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.10.8 (OpenJobDescription/openjd-sessions-for-python#310) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Pin virtualenv<21 for python 3.9 (OpenJobDescription/openjd-sessions-for-python#305) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Revert "chore: temporary pin virtualenv<21 to fix build (OpenJobDescription/openjd-sessions-for-python#303)" (OpenJobDescription/openjd-sessions-for-python#304) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Temporary pin virtualenv<21 to fix build (OpenJobDescription/openjd-sessions-for-python#303) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.10.7 (OpenJobDescription/openjd-sessions-for-python#301) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Update changelog description ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.10.7 ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.10.6 (OpenJobDescription/openjd-sessions-for-python#290) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Bump actions/checkout from 5 to 6 (OpenJobDescription/openjd-sessions-for-python#286) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- As of hatch 1.16.0, 'hatch build' can't be run in non-builder envs (OpenJobDescription/openjd-sessions-for-python#288) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.10.5 (OpenJobDescription/openjd-sessions-for-python#283) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add private _run_task_without_session_env function to the Session class (OpenJobDescription/openjd-sessions-for-python#281) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Revert "chore: pin the version of click that hatch uses to <8.… (OpenJobDescription/openjd-sessions-for-python#273) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Bump actions/setup-python from 5 to 6 (OpenJobDescription/openjd-sessions-for-python#266) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Pin the version of click that hatch uses to <8.3 due to Sentin… (OpenJobDescription/openjd-sessions-for-python#272) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add responded and stale issue/pr workflows (OpenJobDescription/openjd-sessions-for-python#263) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Enable patch releases (OpenJobDescription/openjd-sessions-for-python#262) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Bump actions/checkout from 4 to 5 (OpenJobDescription/openjd-sessions-for-python#259) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.10.4 ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Update openpgp key documentation (OpenJobDescription/openjd-sessions-for-python#254) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Change publish to pypi to use tag ref instead of release branch. (OpenJobDescription/openjd-sessions-for-python#252) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Allow zero version when releasing ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.10.3 (OpenJobDescription/openjd-sessions-for-python#242) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.10.2 (OpenJobDescription/openjd-sessions-for-python#230) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add internal toggle to disable Running action banner (OpenJobDescription/openjd-sessions-for-python#229) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.10.1 ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.10.0 (OpenJobDescription/openjd-sessions-for-python#219) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- [**breaking**] Update to new openjd-model version and cleanup warnings ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add maintenance label to maintenance GitHub template (OpenJobDescription/openjd-sessions-for-python#211) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Update GitHub issue templates (OpenJobDescription/openjd-sessions-for-python#205) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.9.1 (OpenJobDescription/openjd-sessions-for-python#199) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Upgrade test containers from buster to bookworm (OpenJobDescription/openjd-sessions-for-python#178) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.9.0 (OpenJobDescription/openjd-sessions-for-python#195) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.8.4 (OpenJobDescription/openjd-sessions-for-python#176) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.8.3 (OpenJobDescription/openjd-sessions-for-python#174) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.8.2 (OpenJobDescription/openjd-sessions-for-python#166) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.8.2 (OpenJobDescription/openjd-sessions-for-python#163) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.8.1 (OpenJobDescription/openjd-sessions-for-python#155) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.8.1 (OpenJobDescription/openjd-sessions-for-python#153) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.8.0 (OpenJobDescription/openjd-sessions-for-python#146) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.7.2 (OpenJobDescription/openjd-sessions-for-python#121) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Bump dependabot/fetch-metadata from 1 to 2 (OpenJobDescription/openjd-sessions-for-python#118) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Remove experimental warning for windows (OpenJobDescription/openjd-sessions-for-python#120) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.7.1 (OpenJobDescription/openjd-sessions-for-python#119) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.7.1 (OpenJobDescription/openjd-sessions-for-python#114) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.7.0 (OpenJobDescription/openjd-sessions-for-python#110) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.6.1 (OpenJobDescription/openjd-sessions-for-python#105) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.6.0 (OpenJobDescription/openjd-sessions-for-python#103) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.5.1 (OpenJobDescription/openjd-sessions-for-python#96) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.5.1 (OpenJobDescription/openjd-sessions-for-python#93) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add semantic commit parser options (OpenJobDescription/openjd-sessions-for-python#89) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add windows embedded_files impersonation tests (OpenJobDescription/openjd-sessions-for-python#77) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add Windows subprocess impersonation tests (OpenJobDescription/openjd-sessions-for-python#72) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.5.0 (OpenJobDescription/openjd-sessions-for-python#85) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Publish to PyPI (OpenJobDescription/openjd-sessions-for-python#84) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Backfill the CHANGELOG (OpenJobDescription/openjd-sessions-for-python#83) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.4.0 (OpenJobDescription/openjd-sessions-for-python#82) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Sign GitHub release artifacts with gpg (OpenJobDescription/openjd-sessions-for-python#79) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Use win apis to run process (OpenJobDescription/openjd-sessions-for-python#58) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add gpg verification instructions (OpenJobDescription/openjd-sessions-for-python#78) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Fix release workflow (OpenJobDescription/openjd-sessions-for-python#76) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add new release workflow (OpenJobDescription/openjd-sessions-for-python#67) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Enable macOS in CI (OpenJobDescription/openjd-sessions-for-python#61) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Flesh out the initial README (OpenJobDescription/openjd-sessions-for-python#50) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Update codeowners file (OpenJobDescription/openjd-sessions-for-python#47) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Bump actions/setup-python from 4 to 5 (OpenJobDescription/openjd-sessions-for-python#39) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add Customer Domain Env to Release Workflow (OpenJobDescription/openjd-sessions-for-python#25) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Bump actions/checkout from 3 to 4 (OpenJobDescription/openjd-sessions-for-python#2) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Bump aws-actions/configure-aws-credentials from 2 to 4 (OpenJobDescription/openjd-sessions-for-python#11) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add publishing (OpenJobDescription/openjd-sessions-for-python#9) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+
+### Refactor
+
+- Put every openjd.expr crossing behind the one sys.modules guard ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Updating openjd-model dependency version and tests to use F… (OpenJobDescription/openjd-sessions-for-python#233) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+
+### Testing
+
+- Make the "Trapped" signal handler signal-safe ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Use posixpath.isabs for the POSIX trusted-directory entries ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Wrap a RANGE_EXPR parameter in string() before repr_sh ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Pin wrapper-before-symlink-farm ordering on NixOS ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Pin the trusted-path resolver's security properties ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Pin the observable state the ownership fix changed ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Copyright test failing on new comment by setuptools-scm (OpenJobDescription/openjd-sessions-for-python#307) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Cancel notify - message immediately after 'Trapped' may not be digit (OpenJobDescription/openjd-sessions-for-python#294) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add timestamp for captured logging (OpenJobDescription/openjd-sessions-for-python#293) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add Python versions 3.13 and 3.14 to the github action test matrix ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Timezone information was dropped when parsing the cancel NotifyEnd (OpenJobDescription/openjd-sessions-for-python#261) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Testing containers failing to build (OpenJobDescription/openjd-sessions-for-python#243) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Broaden regex to ignore copyright header file created by setupt… (OpenJobDescription/openjd-sessions-for-python#216) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Upgrade docker testing compatibility to Docker 25.x (OpenJobDescription/openjd-sessions-for-python#172) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Fix test where ping is not available (OpenJobDescription/openjd-sessions-for-python#164) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add cross-user Tempdir tests on Windows (OpenJobDescription/openjd-sessions-for-python#68) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add cross-user Session tests on Windows (OpenJobDescription/openjd-sessions-for-python#66) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add test_runner_base windows impersonation tests (OpenJobDescription/openjd-sessions-for-python#65) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Add test user in Windows github actions (OpenJobDescription/openjd-sessions-for-python#62) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Fix missing `assert` in the test_session.py (OpenJobDescription/openjd-sessions-for-python#64) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Increase test_run_action timeout on Windows (OpenJobDescription/openjd-sessions-for-python#27) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+
+### Build
+
+- [**breaking**] Build the Python packages from the Cargo workspace ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+
+### Revert
+
+- "chore(release): 0.8.2 (OpenJobDescription/openjd-sessions-for-python#163)" (OpenJobDescription/openjd-sessions-for-python#165) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- "chore(release): 0.8.1" (OpenJobDescription/openjd-sessions-for-python#154) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- Ensure process exit code is a 32-bit signed integer (OpenJobDescription/openjd-sessions-for-python#149) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+- 0.5.1 (OpenJobDescription/openjd-sessions-for-python#94) ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+
+### Style
+
+- Reformat with black 26.x ([#4](https://github.com/OpenJobDescription/openjd-rs/pull/4))
+
+
 ## [0.13.1](https://github.com/OpenJobDescription/openjd-rs/releases/tag/python-openjd-sessions-v0.13.1) - 2026-10-08
 
 ### Miscellaneous
