@@ -54,7 +54,7 @@ jobs:
   release-plz-release:
     name: Release-plz release
     # Guard against release-plz running in forks.
-    if: ${{ github.repository == 'OpenJobDescription/openjd-rs' }}
+    if: ${{ github.repository == 'crowecawcaw/openjd-rs' }}
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -137,7 +137,7 @@ jobs:
   # Open or update the Release PR. This runs on every push to main.
   release-plz-pr:
     name: Release-plz PR
-    if: ${{ github.repository == 'OpenJobDescription/openjd-rs' }}
+    if: ${{ github.repository == 'crowecawcaw/openjd-rs' }}
     runs-on: ubuntu-latest
     permissions:
       # Create/update branch with version bumps, changelog, Cargo.lock.
@@ -348,34 +348,6 @@ jobs:
       - name: List artifacts
         run: find dist -type f | sort
 
-      # Same signing scheme as the Python packages used in their own
-      # repositories: a detached PGP signature (<file>.sig) for each artifact.
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
-        with:
-          role-to-assume: ${{ secrets.AWS_PGP_KEY_SECRET_ROLE }}
-          aws-region: us-west-2
-          mask-aws-account-id: true
-      - name: Import PGP key
-        env:
-          PGP_KEY_SECRET: ${{ secrets.AWS_PGP_KEY_SECRET }}
-        run: |
-          set -euo pipefail
-          secret="$(aws secretsmanager get-secret-value --secret-id "$PGP_KEY_SECRET" --query SecretString --output text)"
-          echo "$secret" | jq -r .PrivateKey | gpg --batch --pinentry-mode loopback --import --armor
-          passphrase="$(echo "$secret" | jq -r .Passphrase)"
-          echo "::add-mask::$passphrase"
-          echo "PGP_KEY_PASSPHRASE=$passphrase" >> "$GITHUB_ENV"
-      - name: Sign artifacts
-        env:
-          PGP_USER: ${{ secrets.PGP_USER }}
-        run: |
-          set -euo pipefail
-          find dist -type f ! -name '*.sig' | sort | while read -r file; do
-            printenv PGP_KEY_PASSPHRASE | gpg --batch --pinentry-mode loopback --local-user "$PGP_USER" \
-              --passphrase-fd 0 --output "$file.sig" --detach-sign "$file"
-          done
-
       - name: Attach artifacts to the GitHub Releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -388,28 +360,3 @@ jobs:
             [ -n "$tag" ] || continue
             gh release upload "$tag" dist/"$package"/* --clobber --repo "$REPOSITORY"
           done
-
-      # PyPI rejects .sig files, so upload from per-package copies without them.
-      - name: Stage PyPI uploads
-        run: |
-          set -euo pipefail
-          for package in openjd-model openjd-sessions openjd-cli; do
-            [ -d "dist/$package" ] || continue
-            mkdir -p "pypi/$package"
-            find "dist/$package" -type f ! -name '*.sig' -exec cp {} "pypi/$package/" \;
-          done
-      - name: Publish openjd-model to PyPI
-        if: ${{ env.MODEL_TAG != '' }}
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
-        with:
-          packages-dir: pypi/openjd-model
-      - name: Publish openjd-sessions to PyPI
-        if: ${{ env.SESSIONS_TAG != '' }}
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
-        with:
-          packages-dir: pypi/openjd-sessions
-      - name: Publish openjd-cli to PyPI
-        if: ${{ env.CLI_TAG != '' }}
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
-        with:
-          packages-dir: pypi/openjd-cli

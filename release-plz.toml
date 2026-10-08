@@ -89,18 +89,23 @@ commit_parsers = [
 
 [[package]]
 name = "openjd-expr"
+release = false
 
 [[package]]
 name = "openjd-model"
+release = false
 
 [[package]]
 name = "openjd-sessions"
+release = false
 
 [[package]]
 name = "openjd-cli"
+release = false
 
 [[package]]
 name = "openjd-snapshots"
+release = false
 
 # ── Python packages ─────────────────────────────────────────────────────────
 # Each Python package under python/ has a Cargo.toml whose `version` is the
