@@ -40,11 +40,11 @@ dependencies = [
   # Both pins below are on packages in this repository. Their floors are the
   # in-repo versions, which this package is tested against;
   # scripts/sync_python_pins.py moves them when those packages are released.
-  "openjd-sessions >= 0.13.1,< 0.14",
+  "openjd-sessions >= 0.13.2,< 0.14",
   # 0.11.4 is the first release exporting `create_job_with_symbol_tables` and
   # `JobWithSymbolTables`. 0.11.3 and below have `create_job` only, so the
   # step-scope resolved symbol tables cannot be obtained at all.
-  "openjd-model >= 0.14.0,< 0.15"
+  "openjd-model >= 0.14.1,< 0.15"
 ]
 
 [project.urls]

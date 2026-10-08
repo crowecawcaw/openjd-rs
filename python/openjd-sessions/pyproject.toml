@@ -34,7 +34,7 @@ dependencies = [
   # openjd-model is in this repository. The floor is its in-repo version, which
   # this package is tested against; scripts/sync_python_pins.py moves it when
   # openjd-model is released.
-  "openjd-model >= 0.14.0,< 0.15",
+  "openjd-model >= 0.14.1,< 0.15",
   "pywin32 >= 307; platform_system == 'Windows'",
   "psutil >= 5.9,< 7.3; platform_system == 'Windows'",
 ]
