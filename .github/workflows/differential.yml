@@ -1,0 +1,81 @@
+# Differential testing: openjd-expr vs. an explicitly-attributed oracle.
+#
+# THIS JOB IS EXPECTED TO FAIL on `main` today. That is deliberate: the harness
+# is a bug-reporting tool first, and the failure IS the report. Every failing
+# case is a silent-wrong-value divergence -- the expression evaluates fine and
+# returns a wrong result, which is why the existing test suite, crash probing,
+# and hand review all pass over them.
+#
+# Maintainers: there is no wrong way to take this. Fix the divergences and the
+# job goes green; keep only the harness and delete the cases; take the cases as
+# a bug list and drop the workflow; or close it entirely. The value is in the
+# reproductions, not in this file.
+#
+# Runs on ubuntu only and needs no extra tooling -- the oracle is the CPython
+# already on the runner. Kept out of ci.yml so a red result here is legible as
+# "known divergences" and never confused with a broken build.
+name: Differential (expr vs. oracle)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/openjd-expr/**"
+      - "differential/**"
+      - ".github/workflows/differential.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: differential-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+permissions:
+  contents: read
+
+jobs:
+  differential:
+    name: Differential (expr vs. oracle)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install rust stable
+        run: rustup toolchain install stable --profile minimal
+
+      # Pinned so a CPython upgrade cannot silently change a float repr and
+      # move the results underneath us. The oracle is a dependency and is
+      # versioned like one.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Report toolchain versions
+        run: |
+          rustc --version
+          python3 --version
+
+      - name: Run differential harness
+        id: differential
+        run: python3 differential/run.py --no-color --json differential-report.json
+
+      - name: Upload report
+        # Always: the report is most useful precisely when the step above failed.
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: differential-report
+          path: differential-report.json
+          if-no-files-found: warn
+
+      - name: Explain a failure
+        if: failure() && steps.differential.outcome == 'failure'
+        run: |
+          echo "::notice::Divergences found. Each is a silent-wrong-value case:"
+          echo "::notice::the expression evaluates successfully and returns a wrong result."
+          echo "::notice::See the job log above, or the differential-report.json artifact."

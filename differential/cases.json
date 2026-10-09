@@ -1,0 +1,214 @@
+{
+  "_comment": [
+    "Differential test corpus. Each case pairs an openjd-expr expression with the",
+    "Python snippet that computes the reference answer, plus an explicit statement of",
+    "WHICH oracle is authoritative for that case.",
+    "",
+    "The `oracle` field is the important one and is not decoration:",
+    "",
+    "  cpython  - The 2026-02 Expression Language spec defines the EXPR grammar as a",
+    "             subset of Python and defers to Python semantics for these operators",
+    "             and functions, but does not pin the numeric/formatting edge case in",
+    "             question. CPython is the de-facto definition. A mismatch is a bug in",
+    "             openjd-expr.",
+    "",
+    "  spec     - The spec states the answer explicitly (`spec_ref` cites the line).",
+    "             Where the spec and CPython disagree, the spec wins and CPython's",
+    "             value is recorded only as context. A mismatch against `expected` is",
+    "             a bug; a mismatch against CPython alone is not.",
+    "",
+    "  invariant - No external oracle needed. The case asserts an internal algebraic",
+    "             property (e.g. antisymmetry of ordering) that must hold whatever the",
+    "             spec chooses. A mismatch is a bug regardless of oracle.",
+    "",
+    "  open     - Genuinely undecided: plausible oracles disagree with each other, so",
+    "             the spec must choose. Reported as INFO, never fails the build. These",
+    "             exist to surface spec gaps, not to gate CI.",
+    "",
+    "Adding a case: give it a stable `id`, the `expr`, a `python` snippet evaluating to",
+    "the reference value, and the oracle. Run `differential/run.py --update-expected`",
+    "to fill in `expected` from the chosen oracle, then review the diff by hand before",
+    "committing -- never blind-accept, since that would bake a bug in as expected."
+  ],
+
+  "cases": [
+    {
+      "id": "float-mod-large-quotient",
+      "area": "arithmetic",
+      "expr": "9.2e18 % 0.1",
+      "python": "9.2e18 % 0.1",
+      "oracle": "cpython",
+      "note": "Rust computes l - r*floor(l/r); for a large quotient the product cancels the dividend entirely and the remainder collapses to 0.0. CPython uses fmod and then corrects the sign, preserving precision. Spec mandates floored (not truncated) semantics but is silent on precision, so CPython adjudicates."
+    },
+    {
+      "id": "float-mod-floored-sign",
+      "area": "arithmetic",
+      "expr": "-7.0 % 3.0",
+      "python": "-7.0 % 3.0",
+      "oracle": "spec",
+      "spec_ref": "2026-02-Expression-Language.md:1176 -- '// and % use floored division (rounding toward negative infinity)'",
+      "note": "Guards the floored-semantics contract while the precision fix is applied, so a naive switch to bare fmod (which is truncated, giving -1.0) does not regress the sign."
+    },
+    {
+      "id": "float-floordiv-tie",
+      "area": "arithmetic",
+      "expr": "205.0 // 0.1",
+      "python": "int(205.0 // 0.1)",
+      "oracle": "cpython",
+      "note": "VALUE only. Rust returns 2050, CPython 2049.0 -- 0.1 is slightly above one tenth, so the true quotient is just under 2050. Rust's (l/r).floor() rounds the division before flooring; CPython's float_divmod floors the exact quotient. The `python` snippet wraps in int() deliberately: the spec (line 1162) makes float//float return int, so CPython's float RETURN TYPE is the divergence and Rust's int is correct. Only the numeric value is under test here."
+    },
+    {
+      "id": "float-floordiv-return-type",
+      "area": "arithmetic",
+      "expr": "7.0 // 2.0",
+      "python": "3",
+      "expected": "3",
+      "expected_type": "int",
+      "oracle": "spec",
+      "spec_ref": "2026-02-Expression-Language.md:1162 -- '__floordiv__(a: float, b: float) -> int'",
+      "note": "Pins the int return type against the spec, documenting that CPython (which yields 3.0) is the party diverging. Prevents a fix for float-floordiv-tie from 'aligning with Python' in the wrong direction."
+    },
+    {
+      "id": "float-display-negative-exponent",
+      "area": "display",
+      "expr": "1e-7 * 1.0",
+      "python": "1e-7",
+      "oracle": "cpython",
+      "note": "Rust renders 1e-7, CPython 1e-07. format_float builds C-style exponents by string replacement and its .replace(\"e-0\", \"e-\") strips the very zero-pad the C style requires. Positive exponents are already correct (1e+20), so the bug is one-sided."
+    },
+    {
+      "id": "float-display-negative-exponent-mantissa",
+      "area": "display",
+      "expr": "2.5e-7 * 1.0",
+      "python": "2.5e-7",
+      "oracle": "cpython",
+      "note": "Same defect with a non-unit mantissa, confirming it is the exponent field and not the leading digit."
+    },
+    {
+      "id": "float-display-positive-exponent",
+      "area": "display",
+      "expr": "1e20 * 1.0",
+      "python": "1e20",
+      "oracle": "cpython",
+      "note": "Expected to PASS. Pins the already-correct positive-exponent path so a fix to the negative side does not break it."
+    },
+    {
+      "id": "center-odd-padding-bias",
+      "area": "strings",
+      "expr": "center('ab', 5)",
+      "python": "'ab'.center(5)",
+      "oracle": "cpython",
+      "note": "Odd total padding only. Rust gives ' ab  ' (extra space right), CPython '  ab ' (extra space left). CPython's marg&width&1 rule makes the bias depend on the parity of BOTH the margin and the width. NOTE: not fixed by upstream PR #284, which rewrites center_fn's width preflight but keeps `let left = pad / 2;` verbatim; its regression test uses width 4, where both rules agree."
+    },
+    {
+      "id": "center-odd-padding-bias-wide",
+      "area": "strings",
+      "expr": "center('ab', 7)",
+      "python": "'ab'.center(7)",
+      "oracle": "cpython",
+      "note": "Second parity combination (margin 5, width 7) to distinguish a genuine marg&width&1 implementation from an off-by-one that merely flips the bias."
+    },
+    {
+      "id": "center-even-padding",
+      "area": "strings",
+      "expr": "center('ab', 6)",
+      "python": "'ab'.center(6)",
+      "oracle": "cpython",
+      "note": "Expected to PASS -- even padding, where both rules agree. Control case."
+    },
+    {
+      "id": "windows-join-rootrel-no-drive",
+      "area": "paths",
+      "expr": "path('a\\\\b') / '\\\\x'",
+      "python": "ntpath.join('a\\\\b', '\\\\x')",
+      "oracle": "cpython",
+      "path_format": "windows",
+      "note": "A root-relative right operand with no drive on the left should REPLACE the left (ntpath gives '\\\\x'); Rust concatenates to 'a\\\\b\\\\\\\\x'. The drive and UNC cases are already correct, so only the no-drive branch is missing."
+    },
+    {
+      "id": "windows-join-rootrel-with-drive",
+      "area": "paths",
+      "expr": "path('C:\\\\a\\\\b') / '\\\\x'",
+      "python": "ntpath.join('C:\\\\a\\\\b', '\\\\x')",
+      "oracle": "cpython",
+      "path_format": "windows",
+      "note": "Expected to PASS -- drive is retained, root-relative right rebases onto it. Control for the case above."
+    },
+    {
+      "id": "windows-join-absolute-right",
+      "area": "paths",
+      "expr": "path('C:\\\\a') / 'D:\\\\y'",
+      "python": "ntpath.join('C:\\\\a', 'D:\\\\y')",
+      "oracle": "cpython",
+      "path_format": "windows",
+      "note": "Expected to PASS -- a fully qualified right operand replaces the left."
+    },
+    {
+      "id": "path-string-ordering-antisymmetry",
+      "area": "comparison",
+      "expr": "(path('/tmp/x') < 'ab') == ('ab' > path('/tmp/x'))",
+      "python": "True",
+      "oracle": "invariant",
+      "note": "Ordering must be antisymmetric: a < b and b > a must agree. Rust evaluates this to false -- path('/tmp/x') < 'ab' is false while 'ab' > path('/tmp/x') is true, so both directions claim the string is larger. The mixed-type arm loses operand order. Self-inconsistent on its own terms, so no external oracle is required; CPython refuses the comparison entirely (TypeError), which is why the spec still needs to say what the RESULT should be -- see path-string-ordering-direction."
+    },
+    {
+      "id": "path-string-ordering-antisymmetry-2",
+      "area": "comparison",
+      "expr": "(path('/aaa') < 'zz') == ('zz' > path('/aaa'))",
+      "python": "True",
+      "oracle": "invariant",
+      "note": "Second operand pair, chosen so the correct answer flips relative to the case above. Rules out a fix that hardcodes one direction."
+    },
+    {
+      "id": "path-string-ordering-direction",
+      "area": "comparison",
+      "expr": "path('/tmp/x') < 'ab'",
+      "python": "'/tmp/x' < 'ab'",
+      "oracle": "open",
+      "note": "INFO only, never fails. Once antisymmetry is fixed, the spec must still choose the direction. CPython raises TypeError for PurePosixPath < str, so it cannot adjudicate; comparing the underlying strings gives True. Recorded to make the spec question visible rather than to gate CI."
+    },
+    {
+      "id": "posix-join-empty-component",
+      "area": "paths",
+      "expr": "path('/a/b') / ''",
+      "python": "posixpath.join('/a/b', '')",
+      "oracle": "open",
+      "note": "INFO only. The two plausible Python oracles disagree: posixpath.join('/a/b','') is '/a/b/' (Rust matches this) but PurePosixPath('/a/b') / '' is '/a/b'. Since `/` is the operator, pathlib is arguably the closer analogue -- but this is a spec question, not a bug, and an earlier report wrongly listed it as one. Kept as a live example of why per-case oracle attribution matters."
+    },
+    {
+      "id": "round-float-ndigits-zero-type",
+      "area": "numeric",
+      "expr": "round(3.7, 0)",
+      "python": "round(3.7, 0)",
+      "oracle": "cpython",
+      "note": "Expected to PASS. An earlier report claimed round(float, n<=0) must return int per RFC 0006, but CPython returns float 4.0 for ndigits=0 and openjd-expr agrees. Retained as a regression guard against 'fixing' this to int."
+    },
+    {
+      "id": "round-int-negative-ndigits",
+      "area": "numeric",
+      "expr": "round(9007199254740993, -1)",
+      "python": "round(9007199254740993, -1)",
+      "oracle": "cpython",
+      "note": "Expected to PASS. An earlier report claimed f64 round-trip precision loss here; verified bit-identical to CPython across the tested range. Guard only."
+    },
+    {
+      "id": "int-pow-negative-exponent",
+      "area": "numeric",
+      "expr": "7 ** -3",
+      "python": "7 ** -3",
+      "oracle": "cpython",
+      "note": "Expected to PASS. An earlier report claimed a last-ulp error from repeated squaring; a sweep of ten base/exponent pairs found openjd-expr bit-identical to CPython. Guard only."
+    },
+    {
+      "id": "round-float-trailing-zeros",
+      "area": "display",
+      "expr": "round(3.5, 2)",
+      "python": "str(round(3.5, 2))",
+      "expected": "3.50",
+      "expected_type": "float",
+      "oracle": "spec",
+      "spec_ref": "2026-02-Expression-Language.md:1388 -- 'round(x, ndigits) with positive ndigits preserves trailing zeros'",
+      "note": "Expected to PASS. Spec-mandated and deliberately divergent from CPython, whose str(round(3.5,2)) is '3.5'. A spec-oracle case whose CPython value is recorded as context only -- exactly the situation a CPython-only harness would misreport as a bug."
+    }
+  ]
+}
