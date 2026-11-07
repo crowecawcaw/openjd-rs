@@ -26,7 +26,7 @@ use openjd_snapshots::{
     AbsSnapshotDiff, DecodedManifest, DiffOptions, FileEntry, IncludeExcludePathsFilter, Manifest,
     PartitionOptions, SymlinkPolicy,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Same files and metadata. Directory entries may differ: v2025 makes the
 /// implicit parent directories of a v2023 manifest explicit.
@@ -521,8 +521,17 @@ pub fn ops_gen(data: &[u8]) {
                 match c.validate() {
                     Ok(()) => {}
                     // The known shape: synthesized ancestor dirs repeat a
-                    // path ("/" twice).
-                    Err(e) if e.to_string().contains("duplicate path: ") => {
+                    // path ("/" twice), or a deleted file is also recorded as
+                    // a deleted dir. A file listed twice is not that shape.
+                    Err(e)
+                        if e.to_string().contains("duplicate path: ")
+                            && c.files
+                                .iter()
+                                .map(|f| &f.path)
+                                .collect::<BTreeSet<_>>()
+                                .len()
+                                == c.files.len() =>
+                    {
                         crate::known::hit("snapshots-compose-dirs", || {
                             format!("compose produced an invalid manifest: {e}")
                         })
@@ -583,21 +592,27 @@ pub fn ops_gen(data: &[u8]) {
                                 && (symlinked
                                     || differ.iter().all(|(p, x, y)| {
                                         // A deletion the combined diff loses
-                                        // (it records a deleted file as a
-                                        // deleted directory).
+                                        // because it records the path as a
+                                        // directory instead: a deleted file
+                                        // as a deleted dir, or a file deleted
+                                        // and then re-added as a dir.
                                         let lost_delete = x.is_some()
                                             && y.is_none()
                                             && d.files
                                                 .iter()
                                                 .chain(&d2.files)
-                                                .any(|f| f.deleted && f.path == **p);
+                                                .any(|f| f.deleted && f.path == **p)
+                                            && comb.dirs.iter().any(|e| e.path == **p)
+                                            && !comb.files.iter().any(|f| f.path == **p);
                                         dir_change(p) || lost_delete
                                     }));
                             if !known {
                                 oracle!(
                                     differ.is_empty(),
                                     "compose(a, [compose_diffs(d1, d2)]) != compose(a, [d1, d2]): \
-                                     (path, combined, sequential) {differ:?}"
+                                     (path, combined, sequential) {differ:?}\nd1 {:?} {:?}\nd2 {:?} {:?}\n\
+                                     combined {:?} {:?}",
+                                    d.files, d.dirs, d2.files, d2.dirs, comb.files, comb.dirs
                                 );
                             }
                             known_issue!(

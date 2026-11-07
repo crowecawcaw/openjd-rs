@@ -183,11 +183,12 @@ case "$cmd" in
             if [[ -d "$FUZZ_DIR/corpus/$t" ]]; then
                 cp "$FUZZ_DIR/corpus/$t"/* "$raw/$t/" 2>/dev/null || true
             fi
-            rm -rf "$FUZZ_DIR/corpus/$t"
-            mkdir -p "$FUZZ_DIR/corpus/$t"
             cargo_fuzz cmin --debug-assertions "$t" "$raw/$t" -- \
                 "${LIBFUZZER_ARGS[@]}" "${COMMITTED_CMIN_ARGS[@]}"
-            # cmin minimizes in place; move the survivors into the corpus.
+            # cmin minimizes in place; replace the corpus with the survivors
+            # only once it has succeeded.
+            rm -rf "$FUZZ_DIR/corpus/$t"
+            mkdir -p "$FUZZ_DIR/corpus/$t"
             cp "$raw/$t"/* "$FUZZ_DIR/corpus/$t/"
         done <<< "$targets"
         ;;

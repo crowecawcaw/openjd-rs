@@ -319,7 +319,7 @@ fn known_issue_reproducers_reproduce() {
     for (id, _) in KNOWN_ISSUES {
         if !reproduced.contains(*id) {
             problems.push(format!(
-                "known issue {id:?} has no reproducing regressions/*/known-{id}* file"
+                "known issue {id:?} has no reproducing regressions/*/known-{id}[--note] file"
             ));
         }
     }

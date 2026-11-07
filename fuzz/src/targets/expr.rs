@@ -203,8 +203,18 @@ pub(crate) fn is_null_element_error(e: &ExpressionError) -> bool {
 /// A list built from elements of different types fails at run time with
 /// one of these (concatenation, comprehension, literal).
 pub(crate) fn is_list_element_mix_error(e: &ExpressionError) -> bool {
-    matches!(e.kind(), ExpressionErrorKind::TypeError { message }
-        if message.starts_with("make_list expected ") || message.starts_with("Cannot concatenate "))
+    let ExpressionErrorKind::TypeError { message } = e.kind() else {
+        return false;
+    };
+    // Only operands of different types: refusing two lists of one element
+    // type is a real failure.
+    if let Some(r) = message.strip_prefix("Cannot concatenate ") {
+        return r.split_once(" and ").is_some_and(|(a, b)| a != b);
+    }
+    message
+        .strip_prefix("make_list expected ")
+        .and_then(|r| r.split_once(" element, got "))
+        .is_some_and(|(a, b)| a != b)
 }
 
 /// A comprehension over a value that cannot be iterated. `nulltype` is
@@ -317,41 +327,46 @@ impl Facts {
     }
 }
 
-/// Does `code` (string literals blanked) slice with a step (`x[a:b:c]`,
-/// `x[::c]`)? Counts `:` at the bracket's own nesting level.
-pub(crate) fn has_stepped_slice(code: &str) -> bool {
-    let mut colons: Vec<usize> = Vec::new();
+/// Does `code` (string literals blanked) slice with a step that may be
+/// negative (`x[a:b:-1]`, `x[::floor(-2.5)]`: the step's text has a `-`)?
+pub(crate) fn has_negative_step_slice(code: &str) -> bool {
+    // Per open bracket: (colons at its own level, step text so far).
+    let mut stack: Vec<Option<(usize, String)>> = Vec::new();
     for c in code.chars() {
         match c {
-            '[' => colons.push(0),
-            ']' => {
-                if colons.pop().is_some_and(|n| n >= 2) {
-                    return true;
-                }
-            }
-            '(' | '{' => colons.push(usize::MAX / 2),
-            ')' | '}' => {
-                colons.pop();
-            }
-            ':' => {
-                if let Some(n) = colons.last_mut() {
-                    *n += 1;
+            '[' => stack.push(Some((0, String::new()))),
+            '(' | '{' => stack.push(None),
+            ']' | ')' | '}' => {
+                if let Some(Some((n, step))) = stack.pop() {
+                    if c == ']' && n >= 2 && step.contains('-') {
+                        return true;
+                    }
                 }
             }
             _ => {}
+        }
+        // Text inside nested brackets counts toward every enclosing step.
+        for (n, step) in stack.iter_mut().flatten() {
+            if *n >= 2 {
+                step.push(c);
+            }
+        }
+        if c == ':' {
+            if let Some(Some((n, _))) = stack.last_mut() {
+                *n += 1;
+            }
         }
     }
     false
 }
 
-/// Known issue `expr-range-slice-static-type`: a stepped slice of an
-/// unresolved `range_expr` is typed `range_expr`, though a negative step
-/// gives `list[int]`, so a `list[int]` turns up where the checker expected
-/// a range.
+/// Known issue `expr-range-slice-static-type`: a negative-step slice of
+/// an unresolved `range_expr` is typed `range_expr`, though it gives
+/// `list[int]`, so a `list[int]` turns up where the checker expected a range.
 fn is_range_slice_miss(e: &ExpressionError) -> bool {
     let code = e.expr().map(blank_string_literals).unwrap_or_default();
     let m = e.message();
-    has_stepped_slice(&code)
+    has_negative_step_slice(&code)
         && m.contains("list[int]")
         && !m.starts_with("No matching signature for __getitem__(")
 }
@@ -373,7 +388,6 @@ pub(crate) fn check_static_miss(e: &ExpressionError, facts: Facts, msg: impl FnO
     if !(static_class(e.kind()) || is_dispatch_type_error(e)) || is_null_element_error(e) {
         return;
     }
-    let is_type_error = matches!(e.kind(), ExpressionErrorKind::TypeError { .. });
     if is_comparable_refusal(e) {
         oracle!(false, "{}", msg());
     } else if is_range_slice_miss(e) {
@@ -395,9 +409,7 @@ pub(crate) fn check_static_miss(e: &ExpressionError, facts: Facts, msg: impl FnO
         // absorbs type errors in the later operands (name errors there are
         // reported since #462).
         crate::known::hit("expr-boolop-static-type", msg);
-    } else if (facts.unbound_return && is_type_error)
-        || (is_list_element_mix_error(e) && facts.list_add)
-    {
+    } else if (facts.unbound_return || facts.list_add) && is_list_element_mix_error(e) {
         crate::known::hit("expr-unbound-return-typevar", msg);
     } else if is_list_element_mix_error(e) && facts.conditional {
         crate::known::hit("expr-conditional-list-element-join", msg);
@@ -705,9 +717,12 @@ pub fn check_expression(
                 // explains is a new bug.
                 let mut explained: Vec<&'static str> = Vec::new();
                 if mismatch {
+                    // Only a negative step gives a list: it descends.
+                    let descending =
+                        matches!(cv, ExprValue::ListInt(xs) if xs.windows(2).all(|w| w[0] > w[1]));
                     let range_slice = st.to_string().contains("range_expr")
-                        && ct.to_string() == "list[int]"
-                        && has_stepped_slice(&blank_string_literals(src));
+                        && descending
+                        && has_negative_step_slice(&blank_string_literals(src));
                     if range_slice {
                         // The precise cause; the broader gates below don't
                         // also claim it.
@@ -718,7 +733,7 @@ pub fn check_expression(
                     // A `nulltype` in the static type marks an untyped `[]`
                     // branch whose overload won the dispatch.
                     let empty_branch = facts.conditional && st.to_string().contains("nulltype");
-                    if !range_slice && (facts.union || empty_branch) {
+                    if !range_slice && ((facts.union && facts.generated) || empty_branch) {
                         explained.push("expr-union-arg-overload");
                     }
                     // The static pass folds path operations in the host's
