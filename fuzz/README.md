@@ -139,10 +139,13 @@ Each check below is executable, and each was verified to fail when broken:
 Bugs the fuzzer found that need a design decision are gated with
 `known_issue!` (listed in `src/lib.rs::known::KNOWN_ISSUES`, with reproducers
 in `regressions/*/known-*`). A gated violation is ignored so CI stays green;
-`OPENJD_FUZZ_KNOWN=1` turns every gate back into a hard failure:
+`OPENJD_FUZZ_KNOWN=1` turns every gate back into a hard failure, and
+`OPENJD_FUZZ_KNOWN=<id>[,<id>...]` only the named ones (an input can hit more
+than one gate, and the first to fire is the one reported):
 
 ```bash
 OPENJD_FUZZ_KNOWN=1 cargo test --manifest-path fuzz/Cargo.toml --no-default-features --test replay replay_regressions
+OPENJD_FUZZ_KNOWN=model-preprocess-path-idempotence cargo test --manifest-path fuzz/Cargo.toml --no-default-features --test replay replay_regressions
 ```
 
 When a known issue is fixed, change its `known_issue!` to `oracle!` and delete
@@ -159,7 +162,7 @@ the entry, so the fuzzer guards the fix.
 4. Add it to a group in `.github/workflows/fuzz.yml`.
 
 `cargo test --manifest-path fuzz/Cargo.toml --no-default-features` fails
-until steps 1–3 agree.
+until all four steps agree.
 
 ## When the fuzzer finds a bug
 

@@ -48,8 +48,9 @@ cd "$REPO_ROOT"
 
 cargo_fuzz() { cargo "+${FUZZ_TOOLCHAIN}" fuzz "$@"; }
 
-# Exits non-zero if `cargo fuzz list` fails. The loops read the list from a
-# process substitution, which `set -e` doesn't see, so read it up front.
+# Exits non-zero if `cargo fuzz list` fails. Callers read it with
+# `targets="$(...)"` before the loop: a failure inside a here-string or
+# process substitution would not stop the script under `set -e`.
 all_targets() {
     local out
     out="$(cargo_fuzz list)" || { echo "fuzz.sh: cargo fuzz list failed" >&2; exit 1; }

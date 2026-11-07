@@ -7,7 +7,9 @@
 //!
 //! - **Redaction never leaks** (REDACTED_ENV_VARS): once a line registers a
 //!   secret with `openjd_redacted_env`, neither that line's display form nor
-//!   any later output line contains it.
+//!   any later output line contains it, and every later output line is
+//!   masked exactly as an independent reference computes (so partial leaks
+//!   at overlapping or adjacent secrets fail too).
 //! - **Environment changes are spawnable** (#360): no `SetEnv` /
 //!   `RedactedEnv` with a NUL or an invalid name reaches the session.
 //! - **Output decoding** (#298, 1e1de45, #366, #369): the helper's framer and
@@ -56,6 +58,59 @@ fn well_formed_redacted_env(line: &str) -> Option<(&str, &str)> {
     (ident && plain).then_some((name, value))
 }
 
+/// What the session's redaction should display for `line`, computed
+/// independently: every byte inside any occurrence of a value (overlapping
+/// or adjacent occurrences included) is covered, and each maximal covered
+/// run becomes `********`. A line that is a registered middle line of a
+/// multi-line value is replaced whole.
+fn reference_redact(line: &str, values: &[String], lines: &[String]) -> String {
+    if lines.iter().any(|l| l == line) {
+        return "********".to_string();
+    }
+    let mut covered = vec![false; line.len()];
+    for v in values.iter().filter(|v| !v.is_empty()) {
+        for (i, _) in line.match_indices(v.as_str()) {
+            covered[i..i + v.len()].iter_mut().for_each(|c| *c = true);
+        }
+        // `match_indices` skips overlapping occurrences; find those too.
+        let mut start = 0;
+        while let Some(p) = line.get(start..).and_then(|r| r.find(v.as_str())) {
+            let at = start + p;
+            covered[at..at + v.len()].iter_mut().for_each(|c| *c = true);
+            start = at + line[at..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    let mut out = String::new();
+    let mut i = 0;
+    while i < line.len() {
+        if covered[i] {
+            while i < line.len() && covered[i] {
+                i += 1;
+            }
+            out.push_str("********");
+        } else {
+            let c = line[i..].chars().next().unwrap();
+            out.push(c);
+            i += c.len_utf8();
+        }
+    }
+    out
+}
+
+/// Mirror of how the filter registers a multi-line redacted value: its
+/// middle lines are redacted as whole lines.
+fn register_middle_lines(value: &str, lines: &mut Vec<String>) {
+    let parts: Vec<&str> = value.split('\n').collect();
+    if parts.len() > 2 {
+        lines.extend(
+            parts[1..parts.len() - 1]
+                .iter()
+                .filter(|p| !p.is_empty())
+                .map(|p| p.to_string()),
+        );
+    }
+}
+
 /// A stream of subprocess output lines through the action filter.
 pub fn directives(data: &[u8]) {
     let mut u = Unstructured::new(&data[..data.len().min(2)]);
@@ -66,6 +121,7 @@ pub fn directives(data: &[u8]) {
     let text = decode_backslashreplace(body);
     let mut filter = ActionFilter::new("s", echo, redactions);
     let mut secrets: Vec<String> = Vec::new();
+    let (mut ref_values, mut ref_lines): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
     for raw in text.split('\n') {
         let line = truncate_line(raw);
         oracle!(
@@ -157,6 +213,31 @@ pub fn directives(data: &[u8]) {
                 );
             }
         }
+        // Output that is not a directive is redacted exactly as the
+        // reference says (catches partial leaks the check above can't).
+        // Values registered by this line apply from the next line on.
+        // The value set is the filter's own (malformed directives register
+        // values too); that it holds every directive's value is checked
+        // below. Values registered by this line apply from the next line on.
+        if !line.trim_start().starts_with("openjd_") {
+            let want = reference_redact(line, &ref_values, &ref_lines);
+            oracle!(
+                display == want,
+                "{line:?} displays as {display:?}, want {want:?} (secrets {ref_values:?})"
+            );
+        }
+        for m in &messages {
+            if let ActionMessage::RedactedEnv { value, .. } = m {
+                register_middle_lines(value, &mut ref_lines);
+            }
+        }
+        ref_values = filter.redacted_values().iter().cloned().collect();
+        for v in secrets.iter().chain(&new_secrets) {
+            oracle!(
+                v.is_empty() || ref_values.contains(v),
+                "redacted value {v:?} is not in the filter's redaction set"
+            );
+        }
         secrets.extend(new_secrets);
         let _ = filter.min_log_level();
     }
@@ -168,13 +249,11 @@ pub fn directives(data: &[u8]) {
         // Everything up to and including the token is kept verbatim (it is
         // not secret); only what follows it must be masked.
         let kept = pos + "openjd_redacted_env:".len();
-        if secret.trim().len() >= 3 && !secret.contains('*') {
-            oracle!(
-                redacted.get(..kept) == Some(&cmd[..kept])
-                    && !redacted[kept..].contains(secret.trim()),
-                "redact_openjd_redacted_env_requests leaked {secret:?}"
-            );
-        }
+        // Everything after the token is replaced, whatever it is.
+        oracle!(
+            redacted == format!("{} ********", &cmd[..kept]),
+            "redact_openjd_redacted_env_requests({cmd:?}) gives {redacted:?} (secret {secret:?})"
+        );
     }
 }
 

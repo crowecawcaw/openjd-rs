@@ -85,7 +85,7 @@ fn is_static_error(e: &ExpressionError) -> bool {
         crate::known::hit("expr-unbound-return-typevar", || e.to_string());
         return false;
     }
-    crate::targets::expr::static_class(e.kind())
+    crate::targets::expr::static_class(e.kind()) || crate::targets::expr::is_dispatch_type_error(e)
 }
 
 /// The static `ExpressionError` behind a model error, if any. A
@@ -248,7 +248,10 @@ pub fn pipeline(
                         v.param_type,
                         JobParameterType::Path | JobParameterType::ListPath
                     );
-                if path_typed {
+                // The known issue is a URI value (`s3://b/x`) re-normalized
+                // as a relative path; any other PATH change is a failure.
+                let uri = path_strings(&v.value).iter().any(|s| looks_like_uri(s));
+                if path_typed && uri {
                     known_issue!(
                         "model-preprocess-path-idempotence",
                         same,
@@ -525,6 +528,26 @@ fn float_format_ranges(t: &JobTemplate) -> Vec<&str> {
     out
 }
 
+/// The strings of a PATH / STRING value or list (as preprocessing sees them).
+fn path_strings(v: &ExprValue) -> Vec<String> {
+    match v {
+        ExprValue::ListString(xs, _) | ExprValue::ListPath(xs, _, _) => xs.clone(),
+        _ => vec![v.to_display_string()],
+    }
+}
+
+/// `scheme:` with a scheme of two or more characters (`s3:`, `https:`), so
+/// a drive letter (`C:`) doesn't count.
+fn looks_like_uri(s: &str) -> bool {
+    s.split_once(':').is_some_and(|(scheme, _)| {
+        scheme.len() >= 2
+            && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
+}
+
 fn sets_eq(a: &[TaskParameterSet], b: &[TaskParameterSet]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| set_eq(x, y))
 }
@@ -733,13 +756,20 @@ fn run_time_resolution(
         .with_path_format(PathFormat::host())
         .with_memory_limit(8 << 20)
         .with_operation_limit(200_000);
+    // Gated like the expr targets' static/run-time agreement check, with
+    // the same known issues.
     let check = |what: &str, fs: &FormatString, st: &SymbolTable| {
         if let Err(e) = fs.resolve_with(st, &opts) {
-            oracle!(
-                !is_static_error(&e),
-                "step {:?}: {what} {:?} validated but fails at run time: {e}",
-                step.name,
-                fs.raw()
+            crate::targets::expr::check_static_miss(
+                &e,
+                crate::targets::expr::Facts::from_format_text(fs.raw()),
+                || {
+                    format!(
+                        "step {:?}: {what} {:?} validated but fails at run time: {e}",
+                        step.name,
+                        fs.raw()
+                    )
+                },
             );
         }
     };

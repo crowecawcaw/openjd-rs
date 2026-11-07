@@ -58,9 +58,9 @@ doctest = false
 
 # Fuzz builds: keep debug assertions and overflow checks on. Most of the bugs
 # this harness exists to catch were `attempt to add with overflow` panics,
-# which a plain release build silently wraps. `targets::init` verifies at
-# startup that overflow checks really are on, so a profile change that turns
-# them off fails loudly instead of quietly disarming every target.
+# which a plain release build silently wraps. The replay tests check that this
+# profile keeps both settings (`release_profile_keeps_overflow_checks`), so a
+# change that turns them off fails instead of quietly disarming every target.
 [profile.release]
 debug = 1
 debug-assertions = true

@@ -114,14 +114,27 @@ pub(crate) fn is_dispatch_type_error(e: &ExpressionError) -> bool {
 }
 
 /// The run-time dispatch failures seen after static acceptance (known issue
-/// `expr-runtime-dispatch-miss`): indexing or slicing with an argument
-/// type `__getitem__` has no signature for, a `null` operand, and `bool`
-/// arithmetic.
+/// `expr-runtime-dispatch-miss`): indexing a value that isn't indexable or
+/// with an index type `__getitem__` has no signature for, a `null` operand,
+/// and `bool` arithmetic.
 fn is_known_dispatch_miss(e: &ExpressionError) -> bool {
     let ExpressionErrorKind::Other(m) = e.kind() else {
         return false;
     };
-    m.starts_with("No matching signature for __getitem__(")
+    // Ordinary indexing and slicing (a list, string, or range receiver;
+    // `int` / `null` bounds) must dispatch; only a receiver that isn't
+    // indexable or an index argument of another type is the known issue.
+    let odd_index = m
+        .strip_prefix("No matching signature for __getitem__(")
+        .and_then(|r| r.strip_suffix(')'))
+        .is_some_and(|args| {
+            let mut args = args.split(", ");
+            let receiver = args.next().unwrap_or("");
+            let indexable =
+                receiver.starts_with("list[") || matches!(receiver, "string" | "range_expr");
+            !indexable || args.any(|t| t != "int" && t != "nulltype")
+        });
+    odd_index
         || (m.starts_with("Cannot use '")
             && (m.contains(" operator with nulltype")
                 || m.ends_with(" and nulltype")
@@ -132,13 +145,28 @@ fn is_known_dispatch_miss(e: &ExpressionError) -> bool {
 /// The ordering operators' cross-type refusal is a run-time check only
 /// (`do_compare`; specs/expr/function-library.md): known issue
 /// `expr-ordering-runtime-type-check`.
+///
+/// Only a refusal of operands the spec doesn't make comparable counts: two
+/// numbers, two strings, or two paths must compare, so refusing them is a
+/// real failure.
 pub(crate) fn is_ordering_type_error(e: &ExpressionError) -> bool {
-    match e.kind() {
-        ExpressionErrorKind::TypeError { message } => ["<", "<=", ">", ">="]
-            .iter()
-            .any(|op| message.starts_with(&format!("Cannot use '{op}' operator with "))),
-        _ => false,
-    }
+    let ExpressionErrorKind::TypeError { message } = e.kind() else {
+        return false;
+    };
+    let Some(operands) = ["<", "<=", ">", ">="]
+        .iter()
+        .find_map(|op| message.strip_prefix(&format!("Cannot use '{op}' operator with ")))
+    else {
+        return false;
+    };
+    let comparable = match operands.split_once(" and ") {
+        Some((a, b)) => {
+            let num = |t: &str| t == "int" || t == "float";
+            (num(a) && num(b)) || (a == b && matches!(a, "string" | "path"))
+        }
+        None => false,
+    };
+    !comparable
 }
 
 /// `[f(x) for ...]` where `f` returns `T?`: the list is `list[T]` whenever
@@ -284,6 +312,12 @@ pub(crate) fn check_static_miss(e: &ExpressionError, facts: Facts, msg: impl FnO
         crate::known::hit("expr-runtime-dispatch-miss", msg);
     } else if is_ordering_type_error(e) {
         crate::known::hit("expr-ordering-runtime-type-check", msg);
+    } else if (facts.union || facts.conditional)
+        && matches!(e.kind(), ExpressionErrorKind::Other(m) if m.starts_with("No matching signature for "))
+    {
+        // A union argument (`'a' if c else 3`) satisfied one overload
+        // statically; the run-time member has none.
+        crate::known::hit("expr-union-arg-overload", msg);
     } else if is_non_iterable_error(e) && !facts.generated {
         crate::known::hit("expr-listcomp-non-iterable-runtime-check", msg);
     } else if facts.boolop && !is_name_error(e) {

@@ -166,10 +166,12 @@ cargo mutants -p openjd-expr -f <file>                                 # mutatio
 scripts/coverage.sh                                                    # coverage report
 cargo test --manifest-path fuzz/Cargo.toml --no-default-features       # fuzz replay (its own workspace)
 cargo clippy --manifest-path fuzz/Cargo.toml --no-default-features --lib --tests --examples -- -D warnings  # fuzz lint (as CI; not --all-targets)
+cargo +nightly fmt --manifest-path fuzz/Cargo.toml --all -- --check   # fuzz fmt (`fmt --all` skips fuzz/)
 python3 scripts/check_fuzz_api_coverage.py --generate                  # public-API fuzz coverage (Python 3.11+)
 ```
 
-`fuzz/` is a separate workspace with its own lock; see `fuzz/README.md`.
+`fuzz/` is a separate workspace with its own lock: after a dependency update, run
+`scripts/fuzz.sh sync-lock` (CI does this before building). See `fuzz/README.md`.
 
 `scripts/check_public_api.sh` needs a pinned nightly toolchain and
 `cargo-public-api`. The script's header gives the install commands.

@@ -4,8 +4,9 @@
 #
 # Public functions the fuzz corpus deliberately does not execute.
 # Checked by scripts/check_fuzz_api_coverage.py: every other public free
-# function and inherent method of openjd-expr / -model / -sessions /
-# -snapshots must be executed when the committed corpus is replayed.
+# function, inherent method, and method of a hand-written trait impl in the
+# workspace library crates must be executed when the committed corpus is
+# replayed.
 #
 # Keys are exact `crate::module::Type::method` paths (no patterns: a glob
 # would silently exempt a function added later). Every key must name a

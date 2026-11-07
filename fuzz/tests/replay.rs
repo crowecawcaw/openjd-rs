@@ -36,6 +36,28 @@ fn names(it: impl IntoIterator<Item = String>) -> BTreeSet<String> {
     it.into_iter().collect()
 }
 
+/// cargo-fuzz builds with the release profile, which this test (dev
+/// profile) doesn't use, so check that profile's settings directly.
+#[test]
+fn release_profile_keeps_overflow_checks() {
+    let manifest =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
+    let release: Vec<&str> = manifest
+        .split("\n[")
+        .find(|s| s.starts_with("profile.release]"))
+        .expect("fuzz/Cargo.toml has a [profile.release]")
+        .lines()
+        .map(|l| l.split('#').next().unwrap().trim())
+        .collect();
+    for key in ["overflow-checks", "debug-assertions"] {
+        assert!(
+            release.contains(&format!("{key} = true").as_str()),
+            "fuzz/Cargo.toml [profile.release] must set `{key} = true`: \
+             fuzz builds would silently disarm the overflow oracles"
+        );
+    }
+}
+
 #[test]
 fn overflow_checks_are_enabled() {
     let r = catch_unwind(|| std::hint::black_box(i64::MAX) + std::hint::black_box(1));
@@ -88,8 +110,6 @@ fn registry_matches_bins_files_and_corpus() {
     }
 }
 
-/// Every target is fuzzed in CI: it appears in exactly one group of the
-/// `fuzz` job's matrix in fuzz.yml, and no group names an unknown target.
 /// `(name, version)` of every package in a `Cargo.lock`.
 fn locked_packages(path: &Path) -> BTreeSet<(String, String)> {
     let text = std::fs::read_to_string(path).unwrap();
@@ -127,6 +147,8 @@ fn fuzz_lock_matches_workspace_lock() {
     );
 }
 
+/// Every target is fuzzed in CI: it appears in exactly one group of the
+/// `fuzz` job's matrix in fuzz.yml, and no group names an unknown target.
 #[test]
 fn every_target_is_in_one_ci_group() {
     let wf = std::fs::read_to_string(root().join("../.github/workflows/fuzz.yml")).unwrap();

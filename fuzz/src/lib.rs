@@ -62,8 +62,8 @@ macro_rules! oracle {
 }
 
 /// An oracle for a bug that is known and not yet fixed. A violation is
-/// ignored unless `OPENJD_FUZZ_KNOWN=1`, in which case it panics like
-/// [`oracle!`]. Each id must be listed in [`known::KNOWN_ISSUES`]; when the
+/// ignored unless `OPENJD_FUZZ_KNOWN` is `1` or names its id, in which case
+/// it panics like [`oracle!`]. Each id must be listed in [`known::KNOWN_ISSUES`]; when the
 /// bug is fixed, replace the `known_issue!` with `oracle!` and delete the
 /// entry, so the fuzzer guards the fix.
 #[macro_export]
@@ -78,7 +78,7 @@ macro_rules! known_issue {
 pub mod known {
     //! Bugs the fuzzer has found that are not fixed yet. Each one is
     //! reproducible from `regressions/<target>/known-<id>[--note]` with
-    //! `OPENJD_FUZZ_KNOWN=1`, and documented in `fuzz/README.md`.
+    //! `OPENJD_FUZZ_KNOWN=<id>`, and documented in `fuzz/README.md`.
 
     /// `(id, summary)` for every open known issue.
     pub const KNOWN_ISSUES: &[(&str, &str)] = &[
@@ -131,7 +131,8 @@ pub mod known {
         (
             "expr-runtime-dispatch-miss",
             "Some expressions pass static validation and then find no run-time signature: \
-             indexing or slicing with an index type `__getitem__` doesn't accept \
+             indexing a value that isn't indexable at run time, or with an index type \
+             `__getitem__` doesn't accept \
              (`L[re_match(..):None:None]`, `s[1:2:1.5]`), an operand that is `null` at run \
              time (`re_search(..) + range_expr(..)`), and `bool` arithmetic (`True * 3`). \
              Each fails with `No matching signature for __getitem__(..)` or `Cannot use \
@@ -327,10 +328,15 @@ pub mod known {
         RECORDED.with(|r| std::mem::take(&mut *r.borrow_mut()))
     }
 
-    /// Record a known-issue violation; with `OPENJD_FUZZ_KNOWN=1`, fail.
+    /// Record a known-issue violation, and fail if `OPENJD_FUZZ_KNOWN` is
+    /// `1` (every known issue) or a comma-separated list naming `id`. One id
+    /// at a time reproduces an issue that an earlier gate on the same input
+    /// would otherwise report first.
     pub fn hit(id: &str, msg: impl FnOnce() -> String) {
         record(id);
-        if std::env::var_os("OPENJD_FUZZ_KNOWN").is_some_and(|v| v == "1") {
+        let fail = std::env::var("OPENJD_FUZZ_KNOWN")
+            .is_ok_and(|v| v == "1" || v.split(',').any(|x| x.trim() == id));
+        if fail {
             panic!("KNOWN ISSUE [{id}]: {}", msg());
         }
     }
