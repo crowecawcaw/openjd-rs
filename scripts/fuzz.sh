@@ -12,11 +12,15 @@
 #                                       sanitizer build (no mutation)
 #   scripts/fuzz.sh corpus              rebuild fuzz/corpus from the repo's
 #                                       fixtures (plus OPENJD_SPECS_DIR if set)
-#                                       and minimize it with `cargo fuzz cmin`
+#                                       and the committed inputs, minimized
+#                                       with `cargo fuzz cmin`
 #   scripts/fuzz.sh cmin [TARGET...]    re-minimize fuzz/corpus in place,
 #                                       folding in FUZZ_WORK_DIR if present
 #   scripts/fuzz.sh cmin-work [TARGET...]  minimize FUZZ_WORK_DIR in place
 #   scripts/fuzz.sh dict                regenerate fuzz/dicts/expr.dict
+#   scripts/fuzz.sh sync-lock           reset fuzz/Cargo.lock to the workspace
+#                                       lock's versions (after a dependency or
+#                                       version bump)
 #   scripts/fuzz.sh list                print target names
 #
 # Environment:
@@ -44,7 +48,14 @@ cd "$REPO_ROOT"
 
 cargo_fuzz() { cargo "+${FUZZ_TOOLCHAIN}" fuzz "$@"; }
 
-all_targets() { cargo_fuzz list; }
+# Exits non-zero if `cargo fuzz list` fails. The loops read the list from a
+# process substitution, which `set -e` doesn't see, so read it up front.
+all_targets() {
+    local out
+    out="$(cargo_fuzz list)" || { echo "fuzz.sh: cargo fuzz list failed" >&2; exit 1; }
+    [[ -n "$out" ]] || { echo "fuzz.sh: cargo fuzz list printed no targets" >&2; exit 1; }
+    printf '%s\n' "$out"
+}
 
 targets_or_all() {
     if [[ $# -gt 0 ]]; then
@@ -91,6 +102,7 @@ case "$cmd" in
         # `cargo fuzz run` builds only the target it runs. A failing target
         # does not stop the rest of the list; the exit status reports it.
         failed=()
+        targets="$(targets_or_all "$@")"
         while IFS= read -r t; do
             [[ -z "$t" ]] && continue
             mkdir -p "$FUZZ_WORK_DIR/$t" "$FUZZ_DIR/corpus/$t"
@@ -118,7 +130,7 @@ case "$cmd" in
                 failed+=("$t")
             fi
             echo "::endgroup::"
-        done < <(targets_or_all "$@")
+        done <<< "$targets"
         if [[ ${#failed[@]} -gt 0 ]]; then
             echo "fuzzing found failures in: ${failed[*]} (inputs in fuzz/artifacts/)" >&2
             exit 1
@@ -127,6 +139,7 @@ case "$cmd" in
 
     replay)
         cargo_fuzz build --debug-assertions
+        targets="$(targets_or_all "$@")"
         while IFS= read -r t; do
             [[ -z "$t" ]] && continue
             dirs=()
@@ -138,7 +151,7 @@ case "$cmd" in
             cargo_fuzz run --debug-assertions "$t" "${dirs[@]}" -- \
                 "${LIBFUZZER_ARGS[@]}" -runs=0
             echo "::endgroup::"
-        done < <(targets_or_all "$@")
+        done <<< "$targets"
         ;;
 
     corpus)
@@ -147,29 +160,38 @@ case "$cmd" in
         cargo run --manifest-path "$FUZZ_DIR/Cargo.toml" --no-default-features \
             --example build_corpus -- "$raw" ${OPENJD_SPECS_DIR:+"$OPENJD_SPECS_DIR"}
         cargo_fuzz build --debug-assertions
+        targets="$(all_targets)"
         while IFS= read -r t; do
             [[ -z "$t" ]] && continue
+            # Keep the committed inputs as candidates too: fixtures alone
+            # may not reach everything the API gate checks.
+            mkdir -p "$raw/$t"
+            if [[ -d "$FUZZ_DIR/corpus/$t" ]]; then
+                cp "$FUZZ_DIR/corpus/$t"/* "$raw/$t/" 2>/dev/null || true
+            fi
             rm -rf "$FUZZ_DIR/corpus/$t"
             mkdir -p "$FUZZ_DIR/corpus/$t"
             cargo_fuzz cmin --debug-assertions "$t" "$raw/$t" -- \
                 "${LIBFUZZER_ARGS[@]}" "${COMMITTED_CMIN_ARGS[@]}"
             # cmin minimizes in place; move the survivors into the corpus.
             cp "$raw/$t"/* "$FUZZ_DIR/corpus/$t/"
-        done < <(all_targets)
+        done <<< "$targets"
         ;;
 
     cmin-work)
         # Minimize FUZZ_WORK_DIR/<target> in place (CI does this before
         # caching it, so the cached corpus does not grow without bound).
+        targets="$(targets_or_all "$@")"
         while IFS= read -r t; do
             [[ -z "$t" ]] && continue
             [[ -d "$FUZZ_WORK_DIR/$t" ]] && [[ -n "$(ls -A "$FUZZ_WORK_DIR/$t")" ]] || continue
             cargo_fuzz cmin --debug-assertions "$t" "$FUZZ_WORK_DIR/$t" -- "${LIBFUZZER_ARGS[@]}"
-        done < <(targets_or_all "$@")
+        done <<< "$targets"
         ;;
 
     cmin)
         cargo_fuzz build --debug-assertions
+        targets="$(targets_or_all "$@")"
         while IFS= read -r t; do
             [[ -z "$t" ]] && continue
             merged="$(mktemp -d)"
@@ -181,7 +203,15 @@ case "$cmd" in
             mkdir -p "$FUZZ_DIR/corpus/$t"
             cp "$merged"/* "$FUZZ_DIR/corpus/$t/"
             rm -rf "$merged"
-        done < <(targets_or_all "$@")
+        done <<< "$targets"
+        ;;
+
+    sync-lock)
+        # Start fuzz/Cargo.lock from the workspace lock so the harness
+        # builds against the dependency versions the crates ship with,
+        # then let cargo add the fuzz-only packages.
+        cp "$FUZZ_DIR/../Cargo.lock" "$FUZZ_DIR/Cargo.lock"
+        cargo metadata --format-version 1 --manifest-path "$FUZZ_DIR/Cargo.toml" > /dev/null
         ;;
 
     dict)
@@ -190,7 +220,7 @@ case "$cmd" in
         ;;
 
     *)
-        sed -n '7,20p' "${BASH_SOURCE[0]}" >&2
+        sed -n '7,24p' "${BASH_SOURCE[0]}" >&2
         exit 2
         ;;
 esac

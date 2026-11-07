@@ -3,7 +3,8 @@
 Coverage-guided fuzzing ([cargo-fuzz] / libFuzzer, AddressSanitizer, overflow
 checks on) for every library crate, with **property oracles** rather than only
 "does not panic", and a CI gate that proves — from compiler coverage data, not
-a hand-kept list — that the committed corpus executes every public function.
+a hand-kept list — that the committed corpus executes every public function
+not excluded with a reason in `api_coverage.toml`.
 
 [cargo-fuzz]: https://github.com/rust-fuzz/cargo-fuzz
 
@@ -18,10 +19,11 @@ scripts/fuzz.sh run                          # every target, 60 s each
 FUZZ_SECONDS=1800 scripts/fuzz.sh run expr_eval_gen
 scripts/fuzz.sh replay                       # corpus + regressions under ASan
 scripts/fuzz.sh cmin                         # fold fuzz/work/ back into fuzz/corpus/
-scripts/fuzz.sh corpus                       # rebuild the corpus from repo fixtures
+scripts/fuzz.sh corpus                       # rebuild the corpus from repo fixtures + committed inputs
+scripts/fuzz.sh sync-lock                    # reset fuzz/Cargo.lock to the workspace lock's versions
 scripts/fuzz.sh dict                         # regenerate dicts/expr.dict
 
-# Every public function executed by the corpus? (nightly + cargo-llvm-cov)
+# Every public function executed by the corpus? (Python 3.11+, nightly, cargo-llvm-cov)
 python3 scripts/check_fuzz_api_coverage.py --generate --report
 ```
 

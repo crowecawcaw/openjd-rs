@@ -39,6 +39,23 @@ fn env_name_ok(name: &str) -> bool {
         && c.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
+/// `openjd_redacted_env: NAME=value` in its plainest form: an ASCII
+/// identifier, a non-empty value with no quote, NUL, or surrounding
+/// whitespace. The filter must accept every such line.
+fn well_formed_redacted_env(line: &str) -> Option<(&str, &str)> {
+    let (name, value) = line
+        .strip_prefix("openjd_redacted_env: ")?
+        .split_once('=')?;
+    let ident = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let plain =
+        !value.is_empty() && value.trim() == value && !value.contains(['"', '\0', '\r', '\n']);
+    (ident && plain).then_some((name, value))
+}
+
 /// A stream of subprocess output lines through the action filter.
 pub fn directives(data: &[u8]) {
     let mut u = Unstructured::new(&data[..data.len().min(2)]);
@@ -57,8 +74,25 @@ pub fn directives(data: &[u8]) {
             line.len()
         );
         oracle!(raw.starts_with(line), "truncate_line is not a prefix");
+        oracle!(
+            raw.len() > LOG_LINE_MAX_LENGTH || line == raw,
+            "truncate_line changed a {}-byte line",
+            raw.len()
+        );
         let (display, _pass, messages, _failed) = process_line(line, &mut filter, "s");
         let mut new_secrets = Vec::new();
+        // Derived from the input, not from the filter's own messages, so a
+        // filter that stops recognizing the directive still fails here.
+        if let Some((n, v)) = well_formed_redacted_env(line) {
+            oracle!(
+                messages.iter().any(|m| matches!(
+                    m,
+                    ActionMessage::RedactedEnv { name, value } if name == n && value == v
+                )),
+                "well-formed {line:?} produced no RedactedEnv({n}): {messages:?}"
+            );
+            new_secrets.push(v.to_string());
+        }
         for m in &messages {
             // A message's display (it goes to logs) never shows an env value.
             if let ActionMessage::SetEnv { name, .. } | ActionMessage::RedactedEnv { name, .. } = m

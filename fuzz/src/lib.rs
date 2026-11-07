@@ -77,7 +77,7 @@ macro_rules! known_issue {
 
 pub mod known {
     //! Bugs the fuzzer has found that are not fixed yet. Each one is
-    //! reproducible from `regressions/known/<id>` with
+    //! reproducible from `regressions/<target>/known-<id>[--note]` with
     //! `OPENJD_FUZZ_KNOWN=1`, and documented in `fuzz/README.md`.
 
     /// `(id, summary)` for every open known issue.
@@ -127,6 +127,15 @@ pub mod known {
              (`}}` becomes `{{ \"}\" + \"}\" }}`), and literal text between them \
              counts as segments too, so escaping e.g. `a}}` 501 times gives a format string that \
              does not parse (`too many interpolation segments (1002); maximum is 1000`).",
+        ),
+        (
+            "expr-runtime-dispatch-miss",
+            "Some expressions pass static validation and then find no run-time signature: \
+             indexing or slicing with an index type `__getitem__` doesn't accept \
+             (`L[re_match(..):None:None]`, `s[1:2:1.5]`), an operand that is `null` at run \
+             time (`re_search(..) + range_expr(..)`), and `bool` arithmetic (`True * 3`). \
+             Each fails with `No matching signature for __getitem__(..)` or `Cannot use \
+             '<op>' operator with ..`.",
         ),
         (
             "expr-ordering-runtime-type-check",

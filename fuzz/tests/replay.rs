@@ -90,6 +90,43 @@ fn registry_matches_bins_files_and_corpus() {
 
 /// Every target is fuzzed in CI: it appears in exactly one group of the
 /// `fuzz` job's matrix in fuzz.yml, and no group names an unknown target.
+/// `(name, version)` of every package in a `Cargo.lock`.
+fn locked_packages(path: &Path) -> BTreeSet<(String, String)> {
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut out = BTreeSet::new();
+    let mut name = None;
+    for line in text.lines() {
+        if let Some(n) = line.strip_prefix("name = \"") {
+            name = Some(n.trim_end_matches('"').to_string());
+        } else if let Some(v) = line.strip_prefix("version = \"") {
+            if let Some(n) = name.take() {
+                out.insert((n, v.trim_end_matches('"').to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// The fuzz workspace has its own lock. Every package it shares with the
+/// workspace must be locked at a version the workspace also uses, so the
+/// harness tests the dependency versions the crates ship with. Fix a
+/// failure with `scripts/fuzz.sh sync-lock`.
+#[test]
+fn fuzz_lock_matches_workspace_lock() {
+    let ws = locked_packages(&root().join("../Cargo.lock"));
+    let ws_names = names(ws.iter().map(|(n, _)| n.clone()));
+    let drift: Vec<_> = locked_packages(&root().join("Cargo.lock"))
+        .into_iter()
+        .filter(|(n, _)| ws_names.contains(n))
+        .filter(|p| !ws.contains(p))
+        .collect();
+    assert!(
+        drift.is_empty(),
+        "fuzz/Cargo.lock pins versions the workspace lock doesn't \
+         (run scripts/fuzz.sh sync-lock): {drift:?}"
+    );
+}
+
 #[test]
 fn every_target_is_in_one_ci_group() {
     let wf = std::fs::read_to_string(root().join("../.github/workflows/fuzz.yml")).unwrap();
@@ -257,4 +294,25 @@ fn expression_dictionary_covers_the_library() {
         missing.is_empty(),
         "dicts/expr.dict is missing library names {missing:?}; run `scripts/fuzz.sh dict`"
     );
+}
+
+/// Text in string literals is not code: it must not switch on a known-issue
+/// gate and mask a real static/run-time disagreement.
+#[test]
+fn text_facts_ignore_string_literals() {
+    use openjd_fuzz::targets::expr::Facts;
+    let f = Facts::from_text("upper(Param.S + ' or flatten(x) if [] ')");
+    assert!(!f.boolop && !f.union && !f.conditional, "{f:?}");
+    let f = Facts::from_text(r#"upper("a\" and b") + 'sum(1)'"#);
+    assert!(!f.boolop && !f.unbound_return, "{f:?}");
+    let f = Facts::from_text("a or flatten(x) + max (y) if c else []");
+    assert!(
+        f.boolop && f.union && f.unbound_return && f.conditional,
+        "{f:?}"
+    );
+    assert!(!Facts::from_text("my_flatten(x)").union);
+    // A format string's literal text is not code either, and an apostrophe
+    // there does not hide the interpolation after it.
+    let f = Facts::from_format_text("it's or {{ a and b }} flatten(x)");
+    assert!(f.boolop && !f.union, "{f:?}");
 }

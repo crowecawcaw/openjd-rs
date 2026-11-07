@@ -79,12 +79,14 @@ jobs:
       # lib `#[path]`-includes CLI sources whose own cfg(test) modules need
       # the CLI's dev-dependencies.
       - name: Clippy (fuzz crate)
-        if: runner.os == 'Linux'
+        # Lint even when the replay fails.
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
         run: |
           rustup component add clippy
           cargo clippy --manifest-path fuzz/Cargo.toml --no-default-features --lib --tests --examples -- -D warnings
       - name: Rustfmt (fuzz crate)
-        if: runner.os == 'Linux'
+        # Lint even when the replay fails.
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
         run: |
           rustup toolchain install nightly --profile minimal --component rustfmt
           cargo +nightly fmt --manifest-path fuzz/Cargo.toml --all -- --check

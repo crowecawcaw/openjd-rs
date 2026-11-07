@@ -106,6 +106,11 @@ clippy with `-D warnings`, build, tests, conformance, docs with
 `-D warnings`, `cargo deny`, MSRV, the copyright-header check, the public API
 listings, cross-user tests, and the `openjd-for-js` build. Each of these runs on both the workspace and the
 helper sub-crate at `crates/openjd-sessions/src/helper/` where CI does.
+`.github/workflows/fuzz.yml` adds the fuzz crate's checks (`fuzz/` is its own
+workspace, so the workspace commands above don't see it): its replay tests,
+fmt, and clippy, and the public-API fuzz-coverage gate. They are not required
+for merging, but a change that alters behavior or public API MUST keep them
+passing, as `AGENTS.md` "Fuzzing" describes.
 New source files covered by `scripts/check_copyright_headers.sh` MUST carry
 the copyright header. Work that resolves a report item MUST strike that item
 through in the same change, as described in `AGENTS.md`.

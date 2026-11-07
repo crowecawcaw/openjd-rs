@@ -11,8 +11,8 @@
 //!   thousands of expressions, format strings, range expressions, type
 //!   strings, templates, and manifests);
 //! - every YAML/JSON file under `crates/` and `samples/`, plus any extra
-//!   directories given (CI passes the openjd-specifications conformance
-//!   suite), and the `{{ ... }}` interpolations inside them.
+//!   directories given (`scripts/fuzz.sh corpus` passes `OPENJD_SPECS_DIR`,
+//!   e.g. the openjd-specifications conformance suite), and the `{{ ... }}` interpolations inside them.
 //!
 //! Each candidate is routed to the targets whose parser accepts it.
 //! Generated (`*_gen`) and binary targets get deterministic pseudo-random

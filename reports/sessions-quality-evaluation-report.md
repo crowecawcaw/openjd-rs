@@ -351,7 +351,7 @@ Building the `PathMapper` (trie insertion plus an O(R log R) precedence sort) ha
    malicious (or buggy) action script touches directly.~~ **Resolved** — the
    `sessions_directives` fuzz target (redaction-leak and env-validity oracles); it
    found a malformed `openjd_unset_env` being applied as an unset of a variable
-   named after the parse error (fixed separately).
+   named after the parse error (fix in #515).
 8. **Windows tests** — most subprocess and cross-user tests are POSIX-only (`#[cfg(unix)]`).
    Windows coverage is limited to the CI matrix passing; behaviour-level tests for
    Windows signals (`CTRL_BREAK_EVENT`), process-tree kill, and cross-user launch

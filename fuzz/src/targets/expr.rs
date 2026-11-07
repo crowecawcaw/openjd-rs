@@ -96,6 +96,39 @@ pub(crate) fn static_class(kind: &ExpressionErrorKind) -> bool {
     )
 }
 
+/// Run-time dispatch found no signature for the argument types, or a
+/// method's implementation refused its receiver's type. These are type
+/// errors, but the library reports them as `Other`
+/// (`FunctionLibrary::call`, `get_str`, `get_path`), so `static_class`
+/// alone misses them.
+pub(crate) fn is_dispatch_type_error(e: &ExpressionError) -> bool {
+    match e.kind() {
+        ExpressionErrorKind::Other(m) => {
+            m.starts_with("No matching signature for ")
+                || (m.starts_with("Cannot use '") && m.contains("' operator with "))
+                || m.starts_with("String method not supported on ")
+                || m.starts_with("Path method not supported on ")
+        }
+        _ => false,
+    }
+}
+
+/// The run-time dispatch failures seen after static acceptance (known issue
+/// `expr-runtime-dispatch-miss`): indexing or slicing with an argument
+/// type `__getitem__` has no signature for, a `null` operand, and `bool`
+/// arithmetic.
+fn is_known_dispatch_miss(e: &ExpressionError) -> bool {
+    let ExpressionErrorKind::Other(m) = e.kind() else {
+        return false;
+    };
+    m.starts_with("No matching signature for __getitem__(")
+        || (m.starts_with("Cannot use '")
+            && (m.contains(" operator with nulltype")
+                || m.ends_with(" and nulltype")
+                || m.ends_with(" with bool and int")
+                || m.ends_with(" with int and bool")))
+}
+
 /// The ordering operators' cross-type refusal is a run-time check only
 /// (`do_compare`; specs/expr/function-library.md): known issue
 /// `expr-ordering-runtime-type-check`.
@@ -198,21 +231,39 @@ impl Facts {
         }
     }
 
-    fn from_text(src: &str) -> Self {
+    /// [`Facts::from_text`] over each `{{ ... }}` body of a format string
+    /// (the literal text between them is not code).
+    pub fn from_format_text(text: &str) -> Self {
+        let mut f = Self::default();
+        let mut rest = text;
+        while let Some(a) = rest.find("{{") {
+            let after = &rest[a + 2..];
+            let Some(z) = after.find("}}") else { break };
+            let g = Self::from_text(&after[..z]);
+            f.boolop |= g.boolop;
+            f.union |= g.union;
+            f.unbound_return |= g.unbound_return;
+            f.list_add |= g.list_add;
+            f.conditional |= g.conditional;
+            rest = &after[z + 2..];
+        }
+        f
+    }
+
+    /// Inferred from expression source text.
+    pub fn from_text(src: &str) -> Self {
+        // Match constructs in the code, not in string literals:
+        // `upper(Param.S + 'flatten')` calls no `flatten`.
+        let code = blank_string_literals(src);
+        let src = code.as_str();
         let has = |fs: &[&str]| fs.iter().any(|f| src.contains(f));
+        let calls = |fs: &[&str]| fs.iter().any(|f| calls_fn(src, f));
         Self {
             boolop: uses_boolop(src),
             union: (src.contains(" if ") && src.contains("[]"))
-                || has(&[
-                    "::",
-                    "re_findall",
-                    "re_match",
-                    "re_search",
-                    "round",
-                    "**",
-                    "flatten",
-                ]),
-            unbound_return: src.contains(" + ") && has(&["min(", "max(", "sum("]),
+                || has(&["::", "**"])
+                || calls(&["re_findall", "re_match", "re_search", "round", "flatten"]),
+            unbound_return: src.contains(" + ") && calls(&["min", "max", "sum"]),
             list_add: src.contains('+'),
             conditional: src.contains(" if "),
             generated: false,
@@ -225,11 +276,13 @@ impl Facts {
 /// disagreement is a known issue (`unbound_return`: the generator went
 /// through a signature with an unbound return type variable).
 pub(crate) fn check_static_miss(e: &ExpressionError, facts: Facts, msg: impl FnOnce() -> String) {
-    if !static_class(e.kind()) || is_null_element_error(e) {
+    if !(static_class(e.kind()) || is_dispatch_type_error(e)) || is_null_element_error(e) {
         return;
     }
     let is_type_error = matches!(e.kind(), ExpressionErrorKind::TypeError { .. });
-    if is_ordering_type_error(e) {
+    if is_known_dispatch_miss(e) {
+        crate::known::hit("expr-runtime-dispatch-miss", msg);
+    } else if is_ordering_type_error(e) {
         crate::known::hit("expr-ordering-runtime-type-check", msg);
     } else if is_non_iterable_error(e) && !facts.generated {
         crate::known::hit("expr-listcomp-non-iterable-runtime-check", msg);
@@ -392,6 +445,50 @@ pub fn fits(v: &ExprValue, ty: &ExprType) -> bool {
 }
 
 /// Does `src` use `and` / `or` as an operator (word-bounded)?
+/// `src` with the contents of every quoted string literal replaced by
+/// spaces (quotes kept, so offsets and the code around them are unchanged).
+fn blank_string_literals(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in src.chars() {
+        match quote {
+            None => {
+                if c == '\'' || c == '"' {
+                    quote = Some(c);
+                }
+                out.push(c);
+            }
+            Some(q) => {
+                if escaped {
+                    escaped = false;
+                    out.push(' ');
+                } else if c == '\\' {
+                    escaped = true;
+                    out.push(' ');
+                } else if c == q {
+                    quote = None;
+                    out.push(c);
+                } else {
+                    out.push(' ');
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Does `src` call `name`, as a function or a method (`name(` or
+/// `.name(`, not part of a longer identifier)?
+fn calls_fn(src: &str, name: &str) -> bool {
+    let b = src.as_bytes();
+    src.match_indices(name).any(|(i, _)| {
+        let before = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+        let rest = src[i + name.len()..].trim_start();
+        before && rest.starts_with('(')
+    })
+}
+
 pub(crate) fn uses_boolop(src: &str) -> bool {
     let b = src.as_bytes();
     let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'.';
@@ -1065,7 +1162,7 @@ pub fn format_string(data: &[u8]) {
                     "{text:?}: static resolved_type {} but resolution gives {rv:?}",
                     sr.resolved_type
                 ),
-                Err(e) => check_static_miss(e, Facts::from_text(text), || {
+                Err(e) => check_static_miss(e, Facts::from_format_text(text), || {
                     format!("{text:?}: validates but resolution fails with {e}")
                 }),
             }

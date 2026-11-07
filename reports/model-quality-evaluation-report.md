@@ -207,7 +207,7 @@ Re-exports of `FormatString` and `SymbolTable` from `openjd-expr` are appropriat
 2. Limited serialization round-trip testing beyond `test_resolved_bindings.rs`
 3. No concurrent/parallel execution tests
 4. YAML-specific features (anchors, aliases, multi-line strings) not tested
-5. No fuzz/property-based testing for parser robustness
+5. ~~No fuzz/property-based testing for parser robustness~~ **Resolved** — see item 12.
 6. REDACTED_ENV_VARS has only 4 tests — minimal behavioral coverage
 7. No stress tests for large templates (many steps, many params)
 8. ~~Environment template extension handling noted as not yet implemented (some Python tests skipped)~~ **Resolved** — see recommendation 15.

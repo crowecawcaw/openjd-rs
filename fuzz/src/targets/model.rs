@@ -129,7 +129,9 @@ fn inputs(u: &mut Unstructured<'_>, params: &[ParamInfo]) -> JobParameterInputVa
 /// speculatively (`if`/`else`, `and`, `or`)? See known issue
 /// `expr-boolop-static-type`.
 fn speculative_expr(expr: &str) -> bool {
-    crate::targets::expr::uses_boolop(expr) || expr.contains(" if ")
+    // String literal contents are not code (`'a or b'` is no `or`).
+    let f = crate::targets::expr::Facts::from_text(expr);
+    f.boolop || f.conditional
 }
 
 /// Does a `{{ ... }}` interpolation in the template use a speculative
@@ -285,7 +287,11 @@ pub fn pipeline(
                         false,
                         "template validated but create_job fails with a static error: {x}"
                     );
-                } else if has_float_format_range(template) {
+                } else if crate::targets::expr::is_name_error(x)
+                    && float_format_ranges(template)
+                        .iter()
+                        .any(|r| x.expr().is_none_or(|e| r.contains(e)))
+                {
                     known_issue!(
                         "model-float-range-unchecked-scope",
                         false,
@@ -496,23 +502,27 @@ fn set_eq(a: &TaskParameterSet, b: &TaskParameterSet) -> bool {
         })
 }
 
-/// Does the template have a FLOAT task parameter whose range uses a format
-/// string (see known issue `model-float-range-unchecked-scope`)?
-fn has_float_format_range(t: &JobTemplate) -> bool {
+/// The raw text of every FLOAT task-parameter range format string (see
+/// known issue `model-float-range-unchecked-scope`: only a name error in
+/// one of these is explained by it).
+fn float_format_ranges(t: &JobTemplate) -> Vec<&str> {
     use openjd_model::template::{FloatRange, FloatRangeItem, TaskParameterDefinition};
-    t.steps.iter().any(|s| {
-        s.parameter_space.iter().any(|ps| {
-            ps.task_parameter_definitions.iter().any(|d| match d {
-                TaskParameterDefinition::FLOAT(f) => match &f.range {
-                    FloatRange::Expression(_) => true,
-                    FloatRange::List(items) => items
-                        .iter()
-                        .any(|i| matches!(i, FloatRangeItem::FormatString(_))),
-                },
-                _ => false,
-            })
-        })
-    })
+    let mut out = Vec::new();
+    for ps in t.steps.iter().filter_map(|s| s.parameter_space.as_ref()) {
+        for d in &ps.task_parameter_definitions {
+            let TaskParameterDefinition::FLOAT(f) = d else {
+                continue;
+            };
+            match &f.range {
+                FloatRange::Expression(fs) => out.push(fs.raw()),
+                FloatRange::List(items) => out.extend(items.iter().filter_map(|i| match i {
+                    FloatRangeItem::FormatString(fs) => Some(fs.raw()),
+                    FloatRangeItem::Float(_) => None,
+                })),
+            }
+        }
+    }
+    out
 }
 
 fn sets_eq(a: &[TaskParameterSet], b: &[TaskParameterSet]) -> bool {
@@ -621,6 +631,12 @@ fn check_param_space(step: &Step) -> Vec<TaskParameterSet> {
 
 /// Resolve a step's script the way the session does at run time and
 /// require that no static-class error appears.
+///
+/// The symbol table is the session's own (`Session::build_symbol_table`);
+/// resolution then mirrors what `StepScriptRunner` does with it (let
+/// bindings, embedded file data, and `onRun`'s command, args, and timeout
+/// through `FormatString::resolve_with`) without spawning the action.
+/// Environment actions and `onCancel` are not resolved here.
 fn run_time_resolution(
     template: &JobTemplate,
     job: &Job,
@@ -728,9 +744,16 @@ fn run_time_resolution(
         }
     };
     for task in tasks {
-        let Ok(mut st) = session.build_symbol_table(Some(task), step.resolved_symtab.as_ref())
-        else {
-            continue;
+        let mut st = match session.build_symbol_table(Some(task), step.resolved_symtab.as_ref()) {
+            Ok(st) => st,
+            Err(e) => {
+                oracle!(
+                    false,
+                    "step {:?}: build_symbol_table fails for a created task: {e}",
+                    step.name
+                );
+                continue;
+            }
         };
         // Run-time symbols `Session::run_task` adds on top of
         // build_symbol_table.
