@@ -71,6 +71,16 @@ pub fn args(data: &[u8]) {
             params.len(),
             lines.len()
         );
+        // Each argument is `NAME=VALUE` (trimmed, split at the first `=`).
+        for arg in &lines {
+            if let Some((k, v)) = arg.trim().split_once('=') {
+                oracle!(
+                    params.get(k).map(String::as_str) == Some(v),
+                    "task param {arg:?} parsed to {:?}",
+                    params.get(k)
+                );
+            }
+        }
     }
 
     let _ = parse_tasks_arg(text);

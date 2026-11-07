@@ -41,13 +41,12 @@ fn env_name_ok(name: &str) -> bool {
         && c.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-/// `openjd_redacted_env: NAME=value` in its plainest form: an ASCII
-/// identifier, a non-empty value with no quote, NUL, or surrounding
-/// whitespace. The filter must accept every such line.
-fn well_formed_redacted_env(line: &str) -> Option<(&str, &str)> {
-    let (name, value) = line
-        .strip_prefix("openjd_redacted_env: ")?
-        .split_once('=')?;
+/// `<directive>NAME=value` in its plainest form (`openjd_env: `,
+/// `openjd_redacted_env: `): an ASCII identifier, a non-empty value with no
+/// quote, NUL, or surrounding whitespace. The filter must accept every such
+/// line.
+fn well_formed_assignment<'a>(line: &'a str, directive: &str) -> Option<(&'a str, &'a str)> {
+    let (name, value) = line.strip_prefix(directive)?.split_once('=')?;
     let ident = name
         .chars()
         .next()
@@ -139,7 +138,16 @@ pub fn directives(data: &[u8]) {
         let mut new_secrets = Vec::new();
         // Derived from the input, not from the filter's own messages, so a
         // filter that stops recognizing the directive still fails here.
-        if let Some((n, v)) = well_formed_redacted_env(line) {
+        if let Some((n, v)) = well_formed_assignment(line, "openjd_env: ") {
+            oracle!(
+                messages.iter().any(|m| matches!(
+                    m,
+                    ActionMessage::SetEnv { name, value } if name == n && value == v
+                )),
+                "well-formed {line:?} produced no SetEnv({n}={v}): {messages:?}"
+            );
+        }
+        if let Some((n, v)) = well_formed_assignment(line, "openjd_redacted_env: ") {
             oracle!(
                 messages.iter().any(|m| matches!(
                     m,

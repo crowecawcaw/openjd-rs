@@ -20,7 +20,7 @@ FUZZ_SECONDS=1800 scripts/fuzz.sh run expr_eval_gen
 scripts/fuzz.sh replay                       # corpus + regressions under ASan
 scripts/fuzz.sh cmin                         # fold fuzz/work/ back into fuzz/corpus/
 scripts/fuzz.sh corpus                       # rebuild the corpus from repo fixtures + committed inputs
-scripts/fuzz.sh sync-lock                    # reset fuzz/Cargo.lock to the workspace lock's versions
+scripts/fuzz.sh sync-lock                    # fuzz/Cargo.lock := workspace lock's versions + committed fuzz-only pins
 scripts/fuzz.sh dict                         # regenerate dicts/expr.dict
 
 # Every public function executed by the corpus? (Python 3.11+, nightly, cargo-llvm-cov)

@@ -166,7 +166,17 @@ pub mod known {
             "With a union-typed argument (from a conditional or a union-returning function) \
              static dispatch can pick one overload's return type. The original examples \
              (`(a if c else re_findall(..)) * 28`, `L[::z]` on a `range_expr`) were fixed in \
-             #462; regressions/expr_eval_gen/known-expr-union-arg-overload still mismatches.",
+             #462. What remains: a conditional with branches of different types passed to a \
+             function that takes one of them validates and finds no run-time signature \
+             (regressions/model_job_gen/known-expr-union-arg-overload--conditional-dispatch).",
+        ),
+        (
+            "expr-range-slice-static-type",
+            "A stepped slice of an unresolved `range_expr` is typed `range_expr` whatever the \
+             step (evaluator.rs, the unresolved slice path), but a negative step gives \
+             `list[int]` (specs/expr/function-library.md; the signature returns \
+             `range_expr | list[int]`), so `R[:None:-1] + 'x'` or `list(R[:None:-1])` \
+             validates and fails at run time.",
         ),
         (
             "expr-dispatch-derive-mismatch",

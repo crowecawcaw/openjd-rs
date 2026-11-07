@@ -146,27 +146,45 @@ fn is_known_dispatch_miss(e: &ExpressionError) -> bool {
 /// (`do_compare`; specs/expr/function-library.md): known issue
 /// `expr-ordering-runtime-type-check`.
 ///
-/// Only a refusal of operands the spec doesn't make comparable counts: two
-/// numbers, two strings, or two paths must compare, so refusing them is a
+/// Only a refusal of operands the library doesn't order counts: numbers,
+/// strings and paths, bools, and lists must compare, so refusing them is a
 /// real failure.
 pub(crate) fn is_ordering_type_error(e: &ExpressionError) -> bool {
+    ordering_operands(e).is_some_and(|(a, b)| !comparable(a, b))
+}
+
+/// The operand types of an ordering operator's run-time refusal.
+fn ordering_operands(e: &ExpressionError) -> Option<(&str, &str)> {
     let ExpressionErrorKind::TypeError { message } = e.kind() else {
-        return false;
+        return None;
     };
-    let Some(operands) = ["<", "<=", ">", ">="]
+    ["<", "<=", ">", ">="]
         .iter()
-        .find_map(|op| message.strip_prefix(&format!("Cannot use '{op}' operator with ")))
-    else {
-        return false;
+        .find_map(|op| message.strip_prefix(&format!("Cannot use '{op}' operator with ")))?
+        .split_once(" and ")
+}
+
+/// An ordering refused for operands the library orders: always a bug, so
+/// no known-issue gate may absorb it.
+fn is_comparable_refusal(e: &ExpressionError) -> bool {
+    ordering_operands(e).is_some_and(|(a, b)| comparable(a, b))
+}
+
+/// Types `ExprValue::compare` orders: numbers, strings and paths, bools,
+/// and lists whose element types are comparable (element by element).
+fn comparable(a: &str, b: &str) -> bool {
+    let num = |t: &str| t == "int" || t == "float";
+    let text = |t: &str| t == "string" || t == "path";
+    let elem = |t: &str| {
+        t.strip_prefix("list[")
+            .and_then(|r| r.strip_suffix(']'))
+            .map(str::to_owned)
     };
-    let comparable = match operands.split_once(" and ") {
-        Some((a, b)) => {
-            let num = |t: &str| t == "int" || t == "float";
-            (num(a) && num(b)) || (a == b && matches!(a, "string" | "path"))
-        }
-        None => false,
-    };
-    !comparable
+    match (elem(a), elem(b)) {
+        (Some(x), Some(y)) => comparable(&x, &y),
+        (None, None) => (num(a) && num(b)) || (text(a) && text(b)) || (a == "bool" && b == "bool"),
+        _ => false,
+    }
 }
 
 /// `[f(x) for ...]` where `f` returns `T?`: the list is `list[T]` whenever
@@ -289,7 +307,7 @@ impl Facts {
         Self {
             boolop: uses_boolop(src),
             union: (src.contains(" if ") && src.contains("[]"))
-                || has(&["::", "**"])
+                || has(&["**"])
                 || calls(&["re_findall", "re_match", "re_search", "round", "flatten"]),
             unbound_return: src.contains(" + ") && calls(&["min", "max", "sum"]),
             list_add: src.contains('+'),
@@ -297,6 +315,54 @@ impl Facts {
             generated: false,
         }
     }
+}
+
+/// Does `code` (string literals blanked) slice with a step (`x[a:b:c]`,
+/// `x[::c]`)? Counts `:` at the bracket's own nesting level.
+pub(crate) fn has_stepped_slice(code: &str) -> bool {
+    let mut colons: Vec<usize> = Vec::new();
+    for c in code.chars() {
+        match c {
+            '[' => colons.push(0),
+            ']' => {
+                if colons.pop().is_some_and(|n| n >= 2) {
+                    return true;
+                }
+            }
+            '(' | '{' => colons.push(usize::MAX / 2),
+            ')' | '}' => {
+                colons.pop();
+            }
+            ':' => {
+                if let Some(n) = colons.last_mut() {
+                    *n += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Known issue `expr-range-slice-static-type`: a stepped slice of an
+/// unresolved `range_expr` is typed `range_expr`, though a negative step
+/// gives `list[int]`, so a `list[int]` turns up where the checker expected
+/// a range.
+fn is_range_slice_miss(e: &ExpressionError) -> bool {
+    let code = e.expr().map(blank_string_literals).unwrap_or_default();
+    let m = e.message();
+    has_stepped_slice(&code)
+        && m.contains("list[int]")
+        && !m.starts_with("No matching signature for __getitem__(")
+}
+
+/// Did `e` happen after the first `and` / `or` of its expression (the
+/// operands `expr-boolop-static-type` covers)? Unknown positions count.
+fn after_boolop(e: &ExpressionError) -> bool {
+    let (Some(src), Some(at)) = (e.expr(), e.col_offset()) else {
+        return true;
+    };
+    first_boolop(&blank_string_literals(src)).is_some_and(|b| at > b)
 }
 
 /// A statically accepted `src` failed at run time with `e`. Fails the
@@ -308,7 +374,11 @@ pub(crate) fn check_static_miss(e: &ExpressionError, facts: Facts, msg: impl FnO
         return;
     }
     let is_type_error = matches!(e.kind(), ExpressionErrorKind::TypeError { .. });
-    if is_known_dispatch_miss(e) {
+    if is_comparable_refusal(e) {
+        oracle!(false, "{}", msg());
+    } else if is_range_slice_miss(e) {
+        crate::known::hit("expr-range-slice-static-type", msg);
+    } else if is_known_dispatch_miss(e) {
         crate::known::hit("expr-runtime-dispatch-miss", msg);
     } else if is_ordering_type_error(e) {
         crate::known::hit("expr-ordering-runtime-type-check", msg);
@@ -320,7 +390,7 @@ pub(crate) fn check_static_miss(e: &ExpressionError, facts: Facts, msg: impl FnO
         crate::known::hit("expr-union-arg-overload", msg);
     } else if is_non_iterable_error(e) && !facts.generated {
         crate::known::hit("expr-listcomp-non-iterable-runtime-check", msg);
-    } else if facts.boolop && !is_name_error(e) {
+    } else if facts.boolop && !is_name_error(e) && after_boolop(e) {
         // Speculative evaluation of `and`/`or` with an unresolved operand
         // absorbs type errors in the later operands (name errors there are
         // reported since #462).
@@ -524,15 +594,23 @@ fn calls_fn(src: &str, name: &str) -> bool {
 }
 
 pub(crate) fn uses_boolop(src: &str) -> bool {
+    first_boolop(src).is_some()
+}
+
+/// Byte offset of the first `and` / `or` keyword in `src`.
+fn first_boolop(src: &str) -> Option<usize> {
     let b = src.as_bytes();
     let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'.';
-    ["or", "and"].iter().any(|w| {
-        src.match_indices(w).any(|(i, _)| {
-            let before = i == 0 || !ident(b[i - 1]);
-            let after = i + w.len() >= b.len() || !ident(b[i + w.len()]);
-            before && after
+    ["or", "and"]
+        .iter()
+        .filter_map(|w| {
+            src.match_indices(w).map(|(i, _)| i).find(|&i| {
+                let before = i == 0 || !ident(b[i - 1]);
+                let after = i + w.len() >= b.len() || !ident(b[i + w.len()]);
+                before && after
+            })
         })
-    })
+        .min()
 }
 
 /// Does `t` still contain a type variable? A static result typed
@@ -627,13 +705,20 @@ pub fn check_expression(
                 // explains is a new bug.
                 let mut explained: Vec<&'static str> = Vec::new();
                 if mismatch {
-                    if facts.unbound_return || has_type_var(&st) {
+                    let range_slice = st.to_string().contains("range_expr")
+                        && ct.to_string() == "list[int]"
+                        && has_stepped_slice(&blank_string_literals(src));
+                    if range_slice {
+                        // The precise cause; the broader gates below don't
+                        // also claim it.
+                        explained.push("expr-range-slice-static-type");
+                    } else if facts.unbound_return || has_type_var(&st) {
                         explained.push("expr-unbound-return-typevar");
                     }
                     // A `nulltype` in the static type marks an untyped `[]`
                     // branch whose overload won the dispatch.
                     let empty_branch = facts.conditional && st.to_string().contains("nulltype");
-                    if facts.union || empty_branch {
+                    if !range_slice && (facts.union || empty_branch) {
                         explained.push("expr-union-arg-overload");
                     }
                     // The static pass folds path operations in the host's

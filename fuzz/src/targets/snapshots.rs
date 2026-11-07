@@ -542,11 +542,79 @@ pub fn ops_gen(data: &[u8]) {
                 let combined = compose_diffs(&[&d, &d2]);
                 if let (Ok(seq), Ok(comb)) = (seq, combined) {
                     match compose_snapshot_with_diffs(&a, &[&comb]) {
-                        Ok(one) => known_issue!(
-                            "snapshots-compose-dirs",
-                            by_path(&one.files) == by_path(&seq.files),
-                            "compose(a, [compose_diffs(d1, d2)]) != compose(a, [d1, d2])"
-                        ),
+                        Ok(one) => {
+                            let (x, y) = (by_path(&one.files), by_path(&seq.files));
+                            let differ: Vec<_> = x
+                                .iter()
+                                .filter(|(k, v)| y.get(*k) != Some(*v))
+                                .map(|(k, v)| (k, Some(v), y.get(k)))
+                                .chain(
+                                    y.iter()
+                                        .filter(|(k, _)| !x.contains_key(*k))
+                                        .map(|(k, v)| (k, None, Some(v))),
+                                )
+                                .collect();
+                            // The known shape: a differing path is also a
+                            // directory (an ancestor of another entry) in one
+                            // of the diffs, so a file/directory change is lost.
+                            // Also a symlink: the composers resolve paths
+                            // through symlinked directories differently.
+                            let all = || {
+                                a.files
+                                    .iter()
+                                    .chain(&b.files)
+                                    .chain(&c3.files)
+                                    .chain(&d.files)
+                                    .chain(&d2.files)
+                            };
+                            let dir_change = |p: &str| {
+                                let below = format!("{p}/");
+                                all().any(|f| {
+                                    let above = p.starts_with(&format!("{}/", f.path));
+                                    f.path.starts_with(&below)
+                                        || above
+                                        || (f.symlink_target.is_some() && (f.path == p || above))
+                                })
+                            };
+                            let symlinked = differ.iter().any(|(_, x, y)| {
+                                [x, y].iter().any(|c| c.is_some_and(|c| c.2.is_some()))
+                            });
+                            let known = !differ.is_empty()
+                                && (symlinked
+                                    || differ.iter().all(|(p, x, y)| {
+                                        // A deletion the combined diff loses
+                                        // (it records a deleted file as a
+                                        // deleted directory).
+                                        let lost_delete = x.is_some()
+                                            && y.is_none()
+                                            && d.files
+                                                .iter()
+                                                .chain(&d2.files)
+                                                .any(|f| f.deleted && f.path == **p);
+                                        dir_change(p) || lost_delete
+                                    }));
+                            if !known {
+                                oracle!(
+                                    differ.is_empty(),
+                                    "compose(a, [compose_diffs(d1, d2)]) != compose(a, [d1, d2]): \
+                                     (path, combined, sequential) {differ:?}"
+                                );
+                            }
+                            known_issue!(
+                                "snapshots-compose-dirs",
+                                !known,
+                                "compose(a, [compose_diffs(d1, d2)]) != compose(a, [d1, d2]): \
+                                 (path, combined, sequential) {differ:?}\nd1 {:?}\nd2 {:?}",
+                                d.files
+                                    .iter()
+                                    .map(|f| (&f.path, f.deleted))
+                                    .collect::<Vec<_>>(),
+                                d2.files
+                                    .iter()
+                                    .map(|f| (&f.path, f.deleted))
+                                    .collect::<Vec<_>>()
+                            )
+                        }
                         Err(e) => oracle!(false, "compose with combined diff failed: {e}"),
                     }
                 }

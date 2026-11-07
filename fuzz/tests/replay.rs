@@ -37,23 +37,44 @@ fn names(it: impl IntoIterator<Item = String>) -> BTreeSet<String> {
 }
 
 /// cargo-fuzz builds with the release profile, which this test (dev
-/// profile) doesn't use, so check that profile's settings directly.
+/// profile) doesn't use, so check that profile's settings directly: the
+/// release profile turns both on, and no profile section (per-package
+/// overrides included) turns either off.
 #[test]
 fn release_profile_keeps_overflow_checks() {
     let manifest =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
-    let release: Vec<&str> = manifest
-        .split("\n[")
-        .find(|s| s.starts_with("profile.release]"))
-        .expect("fuzz/Cargo.toml has a [profile.release]")
-        .lines()
-        .map(|l| l.split('#').next().unwrap().trim())
-        .collect();
+    let mut section = String::new();
+    let mut release_on = BTreeSet::new();
+    for line in manifest.lines() {
+        let line: String = line
+            .split('#')
+            .next()
+            .unwrap()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        if line.starts_with('[') {
+            section = line;
+            continue;
+        }
+        for key in ["overflow-checks", "debug-assertions"] {
+            if line == format!("{key}=true") && section == "[profile.release]" {
+                release_on.insert(key);
+            }
+            assert!(
+                !(section.starts_with("[profile.")
+                    && line.starts_with(&format!("{key}="))
+                    && line != format!("{key}=true")),
+                "fuzz/Cargo.toml {section} sets `{line}`: fuzz builds would silently disarm \
+                 the overflow oracles"
+            );
+        }
+    }
     for key in ["overflow-checks", "debug-assertions"] {
         assert!(
-            release.contains(&format!("{key} = true").as_str()),
-            "fuzz/Cargo.toml [profile.release] must set `{key} = true`: \
-             fuzz builds would silently disarm the overflow oracles"
+            release_on.contains(key),
+            "fuzz/Cargo.toml [profile.release] must set `{key} = true`"
         );
     }
 }

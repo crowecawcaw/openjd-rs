@@ -74,9 +74,13 @@ jobs:
           restore-keys: fuzz-replay-${{ runner.os }}-
       - name: Sync fuzz/Cargo.lock to the workspace lock
         # Dependabot bumps only the workspace lock; build against the
-        # versions the crates ship with either way.
+        # versions the crates ship with either way, and say when the
+        # committed fuzz lock lags (the lock test fails locally until then).
         shell: bash
-        run: scripts/fuzz.sh sync-lock
+        run: |
+          scripts/fuzz.sh sync-lock
+          git diff --quiet -- fuzz/Cargo.lock ||
+            echo "::warning file=fuzz/Cargo.lock::fuzz/Cargo.lock lags the workspace lock; run scripts/fuzz.sh sync-lock and commit it"
       - name: Replay corpus and regressions
         run: cargo test --manifest-path fuzz/Cargo.toml --no-default-features
       # The fuzz crate is its own workspace, so the main CI's fmt/clippy jobs

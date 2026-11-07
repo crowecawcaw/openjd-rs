@@ -19,8 +19,8 @@
 #   scripts/fuzz.sh cmin-work [TARGET...]  minimize FUZZ_WORK_DIR in place
 #   scripts/fuzz.sh dict                regenerate fuzz/dicts/expr.dict
 #   scripts/fuzz.sh sync-lock           reset fuzz/Cargo.lock to the workspace
-#                                       lock's versions (after a dependency or
-#                                       version bump)
+#                                       lock's versions, keeping the fuzz-only
+#                                       pins (after a dependency bump)
 #   scripts/fuzz.sh list                print target names
 #
 # Environment:
@@ -58,12 +58,25 @@ all_targets() {
     printf '%s\n' "$out"
 }
 
+# The named targets (each must exist, so a typo fails instead of replaying
+# nothing), or every target.
 targets_or_all() {
+    local all
+    all="$(all_targets)" || exit 1
     if [[ $# -gt 0 ]]; then
+        local t
+        for t in "$@"; do
+            grep -qxF -- "$t" <<< "$all" || { echo "fuzz.sh: unknown target '$t'" >&2; exit 1; }
+        done
         printf '%s\n' "$@"
     else
-        all_targets
+        printf '%s\n' "$all"
     fi
+}
+
+# `name version` of every package in a Cargo.lock.
+lock_packages() {
+    awk '/^name = /{n=$3} /^version = /{gsub(/"/,"",n); v=$3; gsub(/"/,"",v); print n, v}' "$1"
 }
 
 # Text targets read tokens from the shared dictionary; generated targets
@@ -139,8 +152,8 @@ case "$cmd" in
         ;;
 
     replay)
-        cargo_fuzz build --debug-assertions
         targets="$(targets_or_all "$@")"
+        cargo_fuzz build --debug-assertions
         while IFS= read -r t; do
             [[ -z "$t" ]] && continue
             dirs=()
@@ -191,8 +204,8 @@ case "$cmd" in
         ;;
 
     cmin)
-        cargo_fuzz build --debug-assertions
         targets="$(targets_or_all "$@")"
+        cargo_fuzz build --debug-assertions
         while IFS= read -r t; do
             [[ -z "$t" ]] && continue
             merged="$(mktemp -d)"
@@ -209,10 +222,23 @@ case "$cmd" in
 
     sync-lock)
         # Start fuzz/Cargo.lock from the workspace lock so the harness
-        # builds against the dependency versions the crates ship with,
-        # then let cargo add the fuzz-only packages.
-        cp "$FUZZ_DIR/../Cargo.lock" "$FUZZ_DIR/Cargo.lock"
+        # builds against the dependency versions the crates ship with, let
+        # cargo add the fuzz-only packages, then put those back at their
+        # committed versions (they decide how corpus bytes decode).
+        old="$(mktemp)"
+        trap 'rm -f "$old"' EXIT
+        cp "$FUZZ_DIR/Cargo.lock" "$old"
+        cp "$REPO_ROOT/Cargo.lock" "$FUZZ_DIR/Cargo.lock"
         cargo metadata --format-version 1 --manifest-path "$FUZZ_DIR/Cargo.toml" > /dev/null
+        ws="$(lock_packages "$REPO_ROOT/Cargo.lock" | cut -d' ' -f1 | sort -u)"
+        new="$(lock_packages "$FUZZ_DIR/Cargo.lock")"
+        while read -r name version; do
+            [[ -z "$name" ]] && continue
+            grep -qxF -- "$name" <<< "$ws" && continue
+            current="$(awk -v n="$name" '$1 == n {print $2}' <<< "$new" | head -n1)"
+            [[ -z "$current" || "$current" == "$version" ]] && continue
+            cargo update --manifest-path "$FUZZ_DIR/Cargo.toml" -p "$name@$current" --precise "$version"
+        done < <(lock_packages "$old")
         ;;
 
     dict)
