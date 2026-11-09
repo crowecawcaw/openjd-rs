@@ -520,6 +520,100 @@ fn lowered_memory_budget_fails_carried_forward_expression_at_create_job() {
     );
 }
 
+/// A format string element of an INT task parameter's range list resolves
+/// under the caller's evaluation budgets too.
+#[test]
+fn lowered_memory_budget_fails_int_range_list_element() {
+    let template = r#"{
+        "specificationVersion": "jobtemplate-2023-09",
+        "extensions": ["EXPR"],
+        "name": "Test",
+        "parameterDefinitions": [{"name": "N", "type": "INT"}],
+        "steps": [{
+            "name": "S",
+            "parameterSpace": {"taskParameterDefinitions": [
+                {"name": "F", "type": "INT", "range": [1, "{{ len('A' * Param.N) }}"]}
+            ]},
+            "script": {"actions": {"onRun": {"command": "echo"}}}
+        }]
+    }"#;
+    let err = create_with_limits(
+        template,
+        &[("N", "10000000")],
+        CallerLimits {
+            max_eval_memory_bytes: Some(1024 * 1024),
+            ..Default::default()
+        },
+    )
+    .expect_err("expected the range element to exceed the memory budget");
+    assert_eq!(
+        err,
+        "Expression error: Task parameter 'F' range[1]: Expression memory usage (10000136 bytes) exceeded limit (1048576 bytes)\n  len('A' * Param.N)\n      ~~~~^~~~~~~~~"
+    );
+}
+
+/// Without EXPR a range list element resolves to a string, under the same
+/// budgets.
+#[test]
+fn lowered_budgets_apply_to_range_list_elements_without_expr() {
+    let template = r#"{
+        "specificationVersion": "jobtemplate-2023-09",
+        "name": "Test",
+        "parameterDefinitions": [{"name": "S", "type": "STRING"}],
+        "steps": [{
+            "name": "S",
+            "parameterSpace": {"taskParameterDefinitions": [
+                {"name": "F", "type": "INT", "range": [1, "{{Param.S}}"]}
+            ]},
+            "script": {"actions": {"onRun": {"command": "echo"}}}
+        }]
+    }"#;
+    let err = create_with_limits(
+        template,
+        &[("S", "5")],
+        CallerLimits {
+            max_eval_operations: Some(0),
+            ..Default::default()
+        },
+    )
+    .expect_err("expected the range element to exceed the operation budget");
+    assert_eq!(
+        err,
+        "Expression error: Task parameter 'F' range[1]: Expression operation count (1) exceeded limit (0)\n  Param.S\n  ~~~~~~^"
+    );
+}
+
+/// The operation budget applies to a range list element as well.
+#[test]
+fn lowered_operation_budget_fails_int_range_list_element() {
+    let template = r#"{
+        "specificationVersion": "jobtemplate-2023-09",
+        "extensions": ["EXPR"],
+        "name": "Test",
+        "parameterDefinitions": [{"name": "N", "type": "INT"}],
+        "steps": [{
+            "name": "S",
+            "parameterSpace": {"taskParameterDefinitions": [
+                {"name": "F", "type": "INT", "range": [1, "{{ sum([1] * Param.N) }}"]}
+            ]},
+            "script": {"actions": {"onRun": {"command": "echo"}}}
+        }]
+    }"#;
+    let err = create_with_limits(
+        template,
+        &[("N", "1000")],
+        CallerLimits {
+            max_eval_operations: Some(50),
+            ..Default::default()
+        },
+    )
+    .expect_err("expected the range element to exceed the operation budget");
+    assert_eq!(
+        err,
+        "Expression error: Task parameter 'F' range[1]: Expression operation count (1003) exceeded limit (50)\n  sum([1] * Param.N)\n      ~~~~^~~~~~~~~"
+    );
+}
+
 #[test]
 fn lowered_memory_budget_fails_job_name_resolution() {
     let template = format!(
@@ -1225,4 +1319,146 @@ fn wrap_hook_timeout_from_param_fails_at_create_job() {
         &["jobEnvironments[0] -> script -> actions -> onWrapTaskRun -> timeout:\n\ttimeout must be > 0."],
     );
     create_default(template, &[("T", "3")]).expect("positive timeout must pass");
+}
+
+// ══════════════════════════════════════════════════════════════
+// Resolution failures keep their ExpressionError
+// ══════════════════════════════════════════════════════════════
+
+/// Create a job from `template` with `Param.N = 0` and return the error.
+fn create_with_zero_n(template: &str) -> openjd_model::ModelError {
+    let jt = decode_job_template(
+        yaml_val(template),
+        Some(&["EXPR", "FEATURE_BUNDLE_1"]),
+        &CallerLimits::default(),
+    )
+    .expect("template passes validation");
+    let input: std::collections::HashMap<String, openjd_expr::ExprValue> =
+        [("N".to_string(), openjd_expr::ExprValue::Int(0))].into();
+    let root = tempfile::TempDir::new().unwrap();
+    let dir = root.path().to_str().unwrap();
+    let processed = preprocess_job_parameters(
+        &jt,
+        &input,
+        &[],
+        &openjd_model::PathParameterOptions::new(dir, dir),
+    )
+    .unwrap();
+    create_job(&jt, &processed, &jt.default_validation_context()).unwrap_err()
+}
+
+/// Assert `err` is a `FormatStringError` whose `source` field, and
+/// `std::error::Error::source()`, both carry a division-by-zero
+/// `ExpressionError`.
+fn assert_division_by_zero_source(err: &openjd_model::ModelError) {
+    let openjd_model::ModelError::FormatStringError {
+        source: Some(source),
+        ..
+    } = err
+    else {
+        panic!("expected FormatStringError with a source, got {err:?}");
+    };
+    assert!(
+        matches!(
+            source.kind(),
+            openjd_expr::ExpressionErrorKind::DivisionByZero { .. }
+        ),
+        "{source:?}"
+    );
+    let dyn_source = std::error::Error::source(err).expect("Error::source() is Some");
+    let expr_err = dyn_source
+        .downcast_ref::<openjd_expr::ExpressionError>()
+        .expect("Error::source() is the ExpressionError");
+    assert!(std::ptr::eq(expr_err, source));
+}
+
+/// A step template whose `hostRequirements` is `host_requirements`.
+fn host_requirements_template(host_requirements: &str) -> String {
+    format!(
+        r#"{{
+        "specificationVersion": "jobtemplate-2023-09",
+        "extensions": ["EXPR", "FEATURE_BUNDLE_1"],
+        "name": "Test",
+        "parameterDefinitions": [{{"name": "N", "type": "INT"}}],
+        "steps": [{{
+            "name": "S",
+            "hostRequirements": {host_requirements},
+            "script": {{"actions": {{"onRun": {{"command": "echo"}}}}}}
+        }}]
+    }}"#
+    )
+}
+
+#[test]
+fn job_name_resolution_failure_keeps_expression_error() {
+    // Division by a parameter is value-dependent, so template validation
+    // accepts it; create_job reports the division by zero, and the error
+    // keeps the ExpressionError so callers can match on its kind.
+    let err = create_with_zero_n(
+        r#"{
+        "specificationVersion": "jobtemplate-2023-09",
+        "extensions": ["EXPR"],
+        "name": "{{ 10 // Param.N }}",
+        "parameterDefinitions": [{"name": "N", "type": "INT"}],
+        "steps": [{"name": "S", "script": {"actions": {"onRun": {"command": "echo"}}}}]
+    }"#,
+    );
+    assert_division_by_zero_source(&err);
+    assert_eq!(
+        err.to_string(),
+        "Format string error: Failed to resolve job name: Division by zero\n  \
+         10 // Param.N\n  ~~~^~~~~~~~~~"
+    );
+}
+
+#[test]
+fn amount_min_resolution_failure_keeps_expression_error() {
+    let err = create_with_zero_n(&host_requirements_template(
+        r#"{"amounts": [{"name": "amount.worker.vcpu", "min": "{{ 10 // Param.N }}"}]}"#,
+    ));
+    assert_division_by_zero_source(&err);
+    assert!(
+        err.to_string()
+            .starts_with("Format string error: hostRequirements amount min: Division by zero"),
+        "{err}"
+    );
+}
+
+#[test]
+fn amount_name_resolution_failure_keeps_expression_error() {
+    let err = create_with_zero_n(&host_requirements_template(
+        r#"{"amounts": [{"name": "amount.custom.n{{ 10 // Param.N }}", "min": 1}]}"#,
+    ));
+    assert_division_by_zero_source(&err);
+    assert!(
+        err.to_string()
+            .starts_with("Format string error: hostRequirements amount name: Division by zero"),
+        "{err}"
+    );
+}
+
+#[test]
+fn attribute_value_resolution_failure_keeps_expression_error() {
+    let err = create_with_zero_n(&host_requirements_template(
+        r#"{"attributes": [{"name": "attr.worker.os.family", "anyOf": ["v{{ 10 // Param.N }}"]}]}"#,
+    ));
+    assert_division_by_zero_source(&err);
+    assert!(
+        err.to_string()
+            .starts_with("Format string error: Division by zero"),
+        "{err}"
+    );
+}
+
+#[test]
+fn attribute_name_resolution_failure_keeps_expression_error() {
+    let err = create_with_zero_n(&host_requirements_template(
+        r#"{"attributes": [{"name": "attr.custom.n{{ 10 // Param.N }}", "anyOf": ["a"]}]}"#,
+    ));
+    assert_division_by_zero_source(&err);
+    assert!(
+        err.to_string()
+            .starts_with("Format string error: hostRequirements attribute name: Division by zero"),
+        "{err}"
+    );
 }

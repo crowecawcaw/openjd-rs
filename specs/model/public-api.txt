@@ -75,6 +75,7 @@ pub openjd_model::error::ModelError::FormatStringError
 pub openjd_model::error::ModelError::FormatStringError::end: core::option::Option<usize>
 pub openjd_model::error::ModelError::FormatStringError::input: core::option::Option<alloc::string::String>
 pub openjd_model::error::ModelError::FormatStringError::message: alloc::string::String
+pub openjd_model::error::ModelError::FormatStringError::source: core::option::Option<openjd_expr::error::ExpressionError>
 pub openjd_model::error::ModelError::FormatStringError::start: core::option::Option<usize>
 pub openjd_model::error::ModelError::ModelValidation(openjd_model::error::ValidationErrors)
 pub openjd_model::error::ModelError::UnsupportedSchema(alloc::string::String)
@@ -719,7 +720,7 @@ impl<'de> serde_core::de::Deserialize<'de> for openjd_model::template::IntOrForm
 pub fn openjd_model::template::IntOrFormatString::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
 pub enum openjd_model::template::IntRange
 pub openjd_model::template::IntRange::Expression(openjd_expr::format_string::FormatString)
-pub openjd_model::template::IntRange::List(alloc::vec::Vec<openjd_model::template::FlexInt>)
+pub openjd_model::template::IntRange::List(alloc::vec::Vec<openjd_model::template::IntOrFormatString>)
 impl core::clone::Clone for openjd_model::template::IntRange
 pub fn openjd_model::template::IntRange::clone(&self) -> openjd_model::template::IntRange
 impl core::fmt::Debug for openjd_model::template::IntRange
@@ -1874,6 +1875,7 @@ pub openjd_model::ModelError::FormatStringError
 pub openjd_model::ModelError::FormatStringError::end: core::option::Option<usize>
 pub openjd_model::ModelError::FormatStringError::input: core::option::Option<alloc::string::String>
 pub openjd_model::ModelError::FormatStringError::message: alloc::string::String
+pub openjd_model::ModelError::FormatStringError::source: core::option::Option<openjd_expr::error::ExpressionError>
 pub openjd_model::ModelError::FormatStringError::start: core::option::Option<usize>
 pub openjd_model::ModelError::ModelValidation(openjd_model::error::ValidationErrors)
 pub openjd_model::ModelError::UnsupportedSchema(alloc::string::String)

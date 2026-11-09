@@ -153,6 +153,12 @@ pub fn create_job(
     let has_expr = ctx
         .profile
         .has_extension(crate::types::ModelExtension::Expr);
+    // Whether the template itself enables EXPR, which decides how a numeric
+    // range list element resolves (`TaskParameterType::range_list_item_target`).
+    // Taken from the template, as template validation takes it, not from
+    // `ctx`, which may enable extensions the template does not declare: a
+    // template's element must resolve the way it was validated.
+    let template_expr = template_profile.has_extension(crate::types::ModelExtension::Expr);
     let limits = EffectiveLimits::from_context(ctx);
     let budgets = EvalBudgets::from_ctx(ctx);
 
@@ -176,6 +182,7 @@ pub fn create_job(
             input: Some(job_template.name.raw().to_string()),
             start: None,
             end: None,
+            source: Some(e),
         })?;
 
     if job_name.chars().count() > limits.max_job_name_len {
@@ -267,6 +274,7 @@ pub fn create_job(
             st,
             &symtab,
             has_expr,
+            template_expr,
             &limits,
             ctx,
             step_index,
