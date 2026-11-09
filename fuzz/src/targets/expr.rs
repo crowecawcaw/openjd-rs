@@ -363,6 +363,95 @@ pub fn has_conditional_expr(code: &str) -> bool {
     false
 }
 
+/// The branch of a conditional expression (`a if c else b`, bounded by its
+/// bracket level and commas) that byte offset `at` of `code` (string
+/// literals blanked) falls in, as a byte range.
+pub fn conditional_branch_at(code: &str, at: usize) -> Option<std::ops::Range<usize>> {
+    let b = code.as_bytes();
+    let mut i = 0;
+    while let Some(k) = code[i..].find(" if ").map(|k| k + i) {
+        i = k + 1;
+        // The else at this level, and the end of the expression after it.
+        let (mut depth, mut els, mut end) = (0i32, None, b.len());
+        for (j, c) in b.iter().enumerate().skip(k + 4) {
+            match c {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' | b',' if depth == 0 => {
+                    end = j;
+                    break;
+                }
+                b')' | b']' | b'}' => depth -= 1,
+                b' ' if depth == 0 && els.is_none() && b[j..].starts_with(b" else ") => {
+                    els = Some(j)
+                }
+                b' ' if depth == 0 && b[j..].starts_with(b" for ") => {
+                    end = j;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let Some(els) = els else { continue };
+        // The start: back to the enclosing bracket or a comma at this level.
+        let mut depth = 0i32;
+        let mut start = 0;
+        for j in (0..k).rev() {
+            match b[j] {
+                b')' | b']' | b'}' => depth += 1,
+                b'(' | b'[' | b'{' | b',' if depth == 0 => {
+                    start = j + 1;
+                    break;
+                }
+                b'(' | b'[' | b'{' => depth -= 1,
+                _ => {}
+            }
+        }
+        for r in [start..k, els + 6..end] {
+            if r.contains(&at) {
+                return Some(r);
+            }
+        }
+    }
+    None
+}
+
+/// Did `e` fail in a conditional branch that the static pass dropped? With
+/// an unresolved test both branches are typed speculatively and one that
+/// fails to type is dropped (specs/expr/evaluator.md, IfExp), so a run taking
+/// it fails by design. The branch is typed on its own against `unresolved`;
+/// one using a comprehension variable doesn't type alone and doesn't count.
+pub(crate) fn in_dropped_branch(
+    e: &ExpressionError,
+    unresolved: &SymbolTable,
+    validation: &FunctionLibrary,
+) -> bool {
+    let (Some(src), Some(at)) = (e.expr(), e.col_offset()) else {
+        return false;
+    };
+    let code = blank_string_literals(src);
+    if code.len() != src.len() || is_name_error(e) {
+        return false;
+    }
+    let Some(r) = conditional_branch_at(&code, at) else {
+        return false;
+    };
+    let Some(branch) = src.get(r) else {
+        return false;
+    };
+    let Ok(p) = ParsedExpression::new(branch.trim()) else {
+        return false;
+    };
+    let tabs = [unresolved];
+    let typed = p
+        .with_library(validation)
+        .with_memory_limit(MEMORY_LIMIT)
+        .with_operation_limit(OP_LIMIT)
+        .evaluate(&tabs);
+    typed.is_err_and(|t| {
+        !is_name_error(&t) && (static_class(t.kind()) || is_dispatch_type_error(&t))
+    })
+}
+
 /// Does `code` (string literals blanked) slice with a step that may be
 /// negative: any step but a non-negative integer literal or `None`
 /// (`x[a:b:-1]`, `x[::Param.N]`, `x[::int('-1')]`)?
@@ -873,7 +962,8 @@ pub fn check_expression(
             (Ok(_), Err(e))
                 if !is_name_error(e)
                     && (static_class(e.kind()) || is_dispatch_type_error(e))
-                    && has_empty_only_comprehension(src, &env.unresolved, &validation) => {}
+                    && (has_empty_only_comprehension(src, &env.unresolved, &validation)
+                        || in_dropped_branch(e, &env.unresolved, &validation)) => {}
             (Ok(sv), Err(e)) => {
                 let lost = Facts {
                     unbound_return: facts.unbound_return || has_type_var(&static_type(sv)),

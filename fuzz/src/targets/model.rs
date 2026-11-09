@@ -768,17 +768,19 @@ fn run_time_resolution(
     let check = |what: &str, fs: &FormatString, st: &SymbolTable| {
         if let Err(e) = fs.resolve_with(st, &opts) {
             use crate::targets::expr as x;
-            // A comprehension typed `list[nulltype]` (documented; see
-            // check_expression).
+            // A comprehension typed `list[nulltype]` or a dropped
+            // conditional branch (documented; see check_expression).
             let documented = !x::is_name_error(&e)
                 && (x::static_class(e.kind()) || x::is_dispatch_type_error(&e))
-                && e.expr().is_some_and(|src| {
-                    x::has_empty_only_comprehension(
-                        src,
-                        &x::unresolved_like(st),
-                        &crate::gen::expr::validation_library(),
-                    )
-                });
+                && {
+                    let (un, lib) = (
+                        x::unresolved_like(st),
+                        crate::gen::expr::validation_library(),
+                    );
+                    e.expr()
+                        .is_some_and(|src| x::has_empty_only_comprehension(src, &un, &lib))
+                        || x::in_dropped_branch(&e, &un, &lib)
+                };
             if documented {
                 return;
             }

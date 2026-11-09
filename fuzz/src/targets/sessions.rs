@@ -227,7 +227,10 @@ pub fn directives(data: &[u8]) {
         // The value set is the filter's own (malformed directives register
         // values too); that it holds every directive's value is checked
         // below. Values registered by this line apply from the next line on.
-        if !line.trim_start().starts_with("openjd_") {
+        // The filter matches the `openjd_` prefix case-insensitively (a
+        // malformed directive such as `oPenjd_env: ..` gets an error), so
+        // only lines without it in any case are plain output.
+        if !line.trim_start().to_lowercase().starts_with("openjd_") {
             let want = reference_redact(line, &ref_values, &ref_lines);
             oracle!(
                 display == want,
