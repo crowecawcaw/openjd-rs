@@ -767,6 +767,21 @@ fn run_time_resolution(
     // the same known issues.
     let check = |what: &str, fs: &FormatString, st: &SymbolTable| {
         if let Err(e) = fs.resolve_with(st, &opts) {
+            use crate::targets::expr as x;
+            // A comprehension typed `list[nulltype]` (documented; see
+            // check_expression).
+            let documented = !x::is_name_error(&e)
+                && (x::static_class(e.kind()) || x::is_dispatch_type_error(&e))
+                && e.expr().is_some_and(|src| {
+                    x::has_empty_only_comprehension(
+                        src,
+                        &x::unresolved_like(st),
+                        &crate::gen::expr::validation_library(),
+                    )
+                });
+            if documented {
+                return;
+            }
             crate::targets::expr::check_static_miss(
                 &e,
                 crate::targets::expr::Facts::from_format_text(fs.raw()),

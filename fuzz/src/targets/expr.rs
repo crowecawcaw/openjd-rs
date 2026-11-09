@@ -34,6 +34,7 @@ use crate::targets::{digest, text_and_control};
 use crate::{known_issue, oracle};
 use arbitrary::Unstructured;
 use openjd_expr::path_mapping::{is_uri, PathMapper};
+use openjd_expr::symbol_table::SymbolTableEntry;
 use openjd_expr::value::Float64;
 use openjd_expr::{
     escape_format_string, EvalContext, ExprProfile, ExprType, ExprValue, ExpressionError,
@@ -685,7 +686,11 @@ fn static_type(v: &ExprValue) -> ExprType {
 /// `list[nulltype]` (only an empty run can succeed)? Each bracketed
 /// comprehension is typed on its own; one that uses an enclosing
 /// comprehension's variable doesn't type alone and doesn't count.
-fn has_empty_only_comprehension(src: &str, env: &Env, validation: &FunctionLibrary) -> bool {
+pub(crate) fn has_empty_only_comprehension(
+    src: &str,
+    unresolved: &SymbolTable,
+    validation: &FunctionLibrary,
+) -> bool {
     let code: Vec<char> = blank_string_literals(src).chars().collect();
     let text: Vec<char> = src.chars().collect();
     if code.len() != text.len() {
@@ -705,7 +710,7 @@ fn has_empty_only_comprehension(src: &str, env: &Env, validation: &FunctionLibra
                 let Ok(p) = ParsedExpression::new(&sub) else {
                     continue;
                 };
-                let tabs = [&env.unresolved];
+                let tabs = [unresolved];
                 let typed = p
                     .with_library(validation)
                     .with_memory_limit(MEMORY_LIMIT)
@@ -719,6 +724,22 @@ fn has_empty_only_comprehension(src: &str, env: &Env, validation: &FunctionLibra
         }
     }
     false
+}
+
+/// `st` with every value replaced by `Unresolved(<its type>)`: the table
+/// the static pass would see for these values.
+pub(crate) fn unresolved_like(st: &SymbolTable) -> SymbolTable {
+    let mut out = SymbolTable::new();
+    for k in st.keys() {
+        match st.get(k) {
+            Some(SymbolTableEntry::Value(v)) => {
+                let _ = out.set(k, ExprValue::unresolved(v.expr_type()));
+            }
+            Some(SymbolTableEntry::Table(t)) => out.set_table(k, unresolved_like(t)),
+            None => {}
+        }
+    }
+    out
 }
 
 /// Every oracle that applies to one parsed expression in one environment.
@@ -852,7 +873,7 @@ pub fn check_expression(
             (Ok(_), Err(e))
                 if !is_name_error(e)
                     && (static_class(e.kind()) || is_dispatch_type_error(e))
-                    && has_empty_only_comprehension(src, env, &validation) => {}
+                    && has_empty_only_comprehension(src, &env.unresolved, &validation) => {}
             (Ok(sv), Err(e)) => {
                 let lost = Facts {
                     unbound_return: facts.unbound_return || has_type_var(&static_type(sv)),
@@ -1742,12 +1763,13 @@ pub fn values(data: &[u8]) {
             Ok(back) => {
                 let same =
                     back.value() == f.value() && back.to_display_string() == f.to_display_string();
-                // The known shape: the reparsed value is one ULP off.
+                // The known shape: the reparsed value is a few ULPs off
+                // (serde_json's parser without `float_roundtrip`; 2 seen).
                 let (x, y) = (f.value(), back.value());
                 let one_ulp = x.is_finite()
                     && y.is_finite()
                     && x.is_sign_positive() == y.is_sign_positive()
-                    && x.to_bits().abs_diff(y.to_bits()) == 1;
+                    && x.to_bits().abs_diff(y.to_bits()) <= 4;
                 if !same && one_ulp {
                     crate::known::hit("expr-float64-serde-precision", || {
                         format!("Float64 serde changed {f:?} -> {json} -> {back:?}")

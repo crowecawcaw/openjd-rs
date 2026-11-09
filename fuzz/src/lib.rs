@@ -167,8 +167,9 @@ pub mod known {
              static dispatch can pick one overload's return type. The original examples \
              (`(a if c else re_findall(..)) * 28`, `L[::z]` on a `range_expr`) were fixed in \
              #462. What remains: a conditional with branches of different types passed to a \
-             function that takes one of them validates and finds no run-time signature \
-             (regressions/model_job_gen/known-expr-union-arg-overload--conditional-dispatch).",
+             function that takes one of them validates and finds no run-time signature: \
+             `upper(1 if Param.B else 'a')` is `string` statically and fails with `No \
+             matching signature for upper(int)` when `Param.B` is true.",
         ),
         (
             "expr-range-slice-static-type",
@@ -189,7 +190,7 @@ pub mod known {
         (
             "expr-float64-serde-precision",
             "`Float64` serializes as a JSON number, and serde_json without its `float_roundtrip` \
-             feature can reparse it one ULP off, so a job's floats do not round-trip through JSON.",
+             feature can reparse it a few ULPs off (2 seen), so a job's floats do not round-trip through JSON.",
         ),
         (
             "expr-empty-range-transport",
