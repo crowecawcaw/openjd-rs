@@ -237,6 +237,13 @@ pub mod known {
              the relative result fails `validate()` (`symlink_target path style mismatch`).",
         ),
         (
+            "snapshots-subtree-root-symlink-empty-target",
+            "`subtree_snapshot` gives a symlink whose target is the subtree root itself an \
+             empty target (`/r/d/l -> /r/d` under `subtree(\"/r/d\", ExcludeEscaping)` \
+             becomes `l -> \"\"`), so the result fails `validate()` (`symlink_target path \
+             style mismatch for l: `).",
+        ),
+        (
             "snapshots-v2025-symlink-target-dirs",
             "The v2025 encoder emits directory entries for a symlink target's ancestors; when \
              one of those is a file (e.g. `/r/a` is a file and `/r/x -> /r/a/c`, or `/r/b -> \
@@ -246,8 +253,10 @@ pub mod known {
         (
             "snapshots-compose-dirs",
             "`compose_snapshot_with_diffs` / `compose_diffs` synthesize ancestor dirs (\"/\" can \
-             appear twice), mark deleted files as deleted dirs, and composing diffs first does not \
-             always equal applying them in sequence.",
+             appear twice) and mark deleted files as deleted dirs, and composing diffs first does \
+             not always equal applying them in sequence where a path changes between file and \
+             directory, lies below a directory a diff deletes, or resolves through a symlink: \
+             the combined diff loses the change.",
         ),
     ];
 

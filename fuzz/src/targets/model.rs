@@ -81,7 +81,10 @@ fn is_static_error(e: &ExpressionError) -> bool {
     }
     // `__add__: (list[T1], list[T2]) -> list[T3]` accepts lists of different
     // element types statically; the concatenation fails at run time.
-    if crate::targets::expr::is_list_element_mix_error(e) {
+    if crate::targets::expr::is_list_element_mix_error(e)
+        && e.expr()
+            .is_some_and(|x| crate::targets::expr::Facts::from_text(x).list_add)
+    {
         crate::known::hit("expr-unbound-return-typevar", || e.to_string());
         return false;
     }
@@ -284,7 +287,11 @@ pub fn pipeline(
             if let Some(x) = model_static_error(&e) {
                 // Speculation is per expression: only the failing one counts.
                 let spec = x.expr().map_or(spec, speculative_expr);
-                if spec && !crate::targets::expr::is_name_error(x) {
+                // As in check_static_miss: a type error after an `and`/`or`.
+                if spec
+                    && !crate::targets::expr::is_name_error(x)
+                    && crate::targets::expr::after_boolop(x)
+                {
                     known_issue!(
                         "expr-boolop-static-type",
                         false,

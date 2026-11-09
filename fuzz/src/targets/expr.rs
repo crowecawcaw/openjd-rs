@@ -66,9 +66,10 @@ fn hash_of<T: Hash>(v: &T) -> u64 {
 /// Errors that are legitimate at run time even after static acceptance:
 /// they depend on concrete values, not types.
 fn value_dependent(kind: &ExpressionErrorKind) -> bool {
-    matches!(
-        kind,
-        ExpressionErrorKind::IntegerOverflow
+    !is_list_literal_type_error(kind)
+        && matches!(
+            kind,
+            ExpressionErrorKind::IntegerOverflow
             | ExpressionErrorKind::DivisionByZero { .. }
             | ExpressionErrorKind::FloatError { .. }
             | ExpressionErrorKind::IndexOutOfBounds { .. }
@@ -79,7 +80,7 @@ fn value_dependent(kind: &ExpressionErrorKind) -> bool {
             // `range_expr('a')`: a value that fails to parse as a range.
             | ExpressionErrorKind::ParseError(_)
             | ExpressionErrorKind::Other(_)
-    )
+        )
 }
 
 /// Errors that a statically accepted expression must never raise at run
@@ -87,13 +88,21 @@ fn value_dependent(kind: &ExpressionErrorKind) -> bool {
 /// checked every operand type. (Value-dependent conversion failures such as
 /// `int('x')` are `Other`, not `TypeError`.)
 pub(crate) fn static_class(kind: &ExpressionErrorKind) -> bool {
-    matches!(
-        kind,
-        ExpressionErrorKind::UndefinedVariable { .. }
-            | ExpressionErrorKind::UnknownFunction { .. }
-            | ExpressionErrorKind::UnsupportedSyntax { .. }
-            | ExpressionErrorKind::TypeError { .. }
-    )
+    is_list_literal_type_error(kind)
+        || matches!(
+            kind,
+            ExpressionErrorKind::UndefinedVariable { .. }
+                | ExpressionErrorKind::UnknownFunction { .. }
+                | ExpressionErrorKind::UnsupportedSyntax { .. }
+                | ExpressionErrorKind::TypeError { .. }
+        )
+}
+
+/// A list literal whose elements have no common type. The evaluator reports
+/// it as `Other`, but it is a type error the static pass checks too.
+fn is_list_literal_type_error(kind: &ExpressionErrorKind) -> bool {
+    matches!(kind, ExpressionErrorKind::Other(m)
+        if m.starts_with("List literal contains incompatible types"))
 }
 
 /// Run-time dispatch found no signature for the argument types, or a
@@ -321,15 +330,42 @@ impl Facts {
                 || calls(&["re_findall", "re_match", "re_search", "round", "flatten"]),
             unbound_return: src.contains(" + ") && calls(&["min", "max", "sum"]),
             list_add: src.contains('+'),
-            conditional: src.contains(" if "),
+            conditional: has_conditional_expr(&code),
             generated: false,
         }
     }
 }
 
+/// Does `code` (string literals blanked) hold a conditional expression
+/// (`a if c else b`)? A comprehension filter (`[x for x in L if c]`) has no
+/// `else` at its bracket level and doesn't count.
+pub fn has_conditional_expr(code: &str) -> bool {
+    let b = code.as_bytes();
+    let mut i = 0;
+    while let Some(at) = code[i..].find(" if ").map(|k| k + i) {
+        let mut depth = 0i32;
+        for (j, c) in b.iter().enumerate().skip(at + 4) {
+            match c {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        break;
+                    }
+                }
+                b' ' if depth == 0 && b[j..].starts_with(b" else ") => return true,
+                _ => {}
+            }
+        }
+        i = at + 1;
+    }
+    false
+}
+
 /// Does `code` (string literals blanked) slice with a step that may be
-/// negative (`x[a:b:-1]`, `x[::floor(-2.5)]`: the step's text has a `-`)?
-pub(crate) fn has_negative_step_slice(code: &str) -> bool {
+/// negative: any step but a non-negative integer literal or `None`
+/// (`x[a:b:-1]`, `x[::Param.N]`, `x[::int('-1')]`)?
+pub fn has_negative_step_slice(code: &str) -> bool {
     // Per open bracket: (colons at its own level, step text so far).
     let mut stack: Vec<Option<(usize, String)>> = Vec::new();
     for c in code.chars() {
@@ -338,7 +374,9 @@ pub(crate) fn has_negative_step_slice(code: &str) -> bool {
             '(' | '{' => stack.push(None),
             ']' | ')' | '}' => {
                 if let Some(Some((n, step))) = stack.pop() {
-                    if c == ']' && n >= 2 && step.contains('-') {
+                    let step = step.trim();
+                    let literal = step == "None" || step.bytes().all(|b| b.is_ascii_digit());
+                    if c == ']' && n >= 2 && !literal {
                         return true;
                     }
                 }
@@ -373,7 +411,7 @@ fn is_range_slice_miss(e: &ExpressionError) -> bool {
 
 /// Did `e` happen after the first `and` / `or` of its expression (the
 /// operands `expr-boolop-static-type` covers)? Unknown positions count.
-fn after_boolop(e: &ExpressionError) -> bool {
+pub(crate) fn after_boolop(e: &ExpressionError) -> bool {
     let (Some(src), Some(at)) = (e.expr(), e.col_offset()) else {
         return true;
     };
@@ -643,6 +681,46 @@ fn static_type(v: &ExprValue) -> ExprType {
     }
 }
 
+/// Does `src` hold a list comprehension that the static pass types
+/// `list[nulltype]` (only an empty run can succeed)? Each bracketed
+/// comprehension is typed on its own; one that uses an enclosing
+/// comprehension's variable doesn't type alone and doesn't count.
+fn has_empty_only_comprehension(src: &str, env: &Env, validation: &FunctionLibrary) -> bool {
+    let code: Vec<char> = blank_string_literals(src).chars().collect();
+    let text: Vec<char> = src.chars().collect();
+    if code.len() != text.len() {
+        return false;
+    }
+    let mut open = Vec::new();
+    for (i, c) in code.iter().enumerate() {
+        match c {
+            '[' => open.push(i),
+            ']' => {
+                let Some(start) = open.pop() else { continue };
+                let inner: String = code[start..=i].iter().collect();
+                if !inner.contains(" for ") {
+                    continue;
+                }
+                let sub: String = text[start..=i].iter().collect();
+                let Ok(p) = ParsedExpression::new(&sub) else {
+                    continue;
+                };
+                let tabs = [&env.unresolved];
+                let typed = p
+                    .with_library(validation)
+                    .with_memory_limit(MEMORY_LIMIT)
+                    .with_operation_limit(OP_LIMIT)
+                    .evaluate(&tabs);
+                if typed.is_ok_and(|v| static_type(&v).to_string() == "list[nulltype]") {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Every oracle that applies to one parsed expression in one environment.
 /// `generated` carries the generator's [`Facts`] for generator output, which
 /// is well-typed by construction (modulo those facts); `None` for text.
@@ -768,6 +846,13 @@ pub fn check_expression(
                     );
                 }
             }
+            // specs/expr/evaluator.md (comprehension result type): a
+            // comprehension whose body or filter fails to type is
+            // `list[nulltype]`, the failure surfacing where values reach it.
+            (Ok(_), Err(e))
+                if !is_name_error(e)
+                    && (static_class(e.kind()) || is_dispatch_type_error(e))
+                    && has_empty_only_comprehension(src, env, &validation) => {}
             (Ok(sv), Err(e)) => {
                 let lost = Facts {
                     unbound_return: facts.unbound_return || has_type_var(&static_type(sv)),
@@ -1654,11 +1739,23 @@ pub fn values(data: &[u8]) {
     if let ExprValue::Float(f) = &a {
         let json = serde_json::to_string(f).unwrap_or_default();
         match serde_json::from_str::<Float64>(&json) {
-            Ok(back) => known_issue!(
-                "expr-float64-serde-precision",
-                back.value() == f.value() && back.to_display_string() == f.to_display_string(),
-                "Float64 serde changed {f:?} -> {json} -> {back:?}"
-            ),
+            Ok(back) => {
+                let same =
+                    back.value() == f.value() && back.to_display_string() == f.to_display_string();
+                // The known shape: the reparsed value is one ULP off.
+                let (x, y) = (f.value(), back.value());
+                let one_ulp = x.is_finite()
+                    && y.is_finite()
+                    && x.is_sign_positive() == y.is_sign_positive()
+                    && x.to_bits().abs_diff(y.to_bits()) == 1;
+                if !same && one_ulp {
+                    crate::known::hit("expr-float64-serde-precision", || {
+                        format!("Float64 serde changed {f:?} -> {json} -> {back:?}")
+                    });
+                } else {
+                    oracle!(same, "Float64 serde changed {f:?} -> {json} -> {back:?}");
+                }
+            }
             Err(e) => oracle!(
                 false,
                 "Float64 {f:?} serializes to {json} which does not deserialize: {e}"

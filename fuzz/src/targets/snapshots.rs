@@ -521,16 +521,14 @@ pub fn ops_gen(data: &[u8]) {
                 match c.validate() {
                     Ok(()) => {}
                     // The known shape: synthesized ancestor dirs repeat a
-                    // path ("/" twice), or a deleted file is also recorded as
-                    // a deleted dir. A file listed twice is not that shape.
+                    // path ("/" twice). A file listed twice, or a dir at a
+                    // file's path, is not that shape.
                     Err(e)
-                        if e.to_string().contains("duplicate path: ")
-                            && c.files
-                                .iter()
-                                .map(|f| &f.path)
-                                .collect::<BTreeSet<_>>()
-                                .len()
-                                == c.files.len() =>
+                        if e.to_string().contains("duplicate path: ") && {
+                            let files: BTreeSet<_> = c.files.iter().map(|f| &f.path).collect();
+                            files.len() == c.files.len()
+                                && !c.dirs.iter().any(|d| files.contains(&d.path))
+                        } =>
                     {
                         crate::known::hit("snapshots-compose-dirs", || {
                             format!("compose produced an invalid manifest: {e}")
@@ -566,8 +564,10 @@ pub fn ops_gen(data: &[u8]) {
                             // The known shape: a differing path is also a
                             // directory (an ancestor of another entry) in one
                             // of the diffs, so a file/directory change is lost.
-                            // Also a symlink: the composers resolve paths
-                            // through symlinked directories differently.
+                            // That includes a path below a symlink (the
+                            // composers resolve paths through symlinked
+                            // directories differently), but not a change to
+                            // the symlink entry itself.
                             let all = || {
                                 a.files
                                     .iter()
@@ -580,32 +580,29 @@ pub fn ops_gen(data: &[u8]) {
                                 let below = format!("{p}/");
                                 all().any(|f| {
                                     let above = p.starts_with(&format!("{}/", f.path));
-                                    f.path.starts_with(&below)
-                                        || above
-                                        || (f.symlink_target.is_some() && (f.path == p || above))
+                                    f.path.starts_with(&below) || above
+                                }) || d.dirs.iter().chain(&d2.dirs).any(|e| {
+                                    // Below a directory a diff deletes.
+                                    e.deleted && p.starts_with(&format!("{}/", e.path))
                                 })
                             };
-                            let symlinked = differ.iter().any(|(_, x, y)| {
-                                [x, y].iter().any(|c| c.is_some_and(|c| c.2.is_some()))
-                            });
                             let known = !differ.is_empty()
-                                && (symlinked
-                                    || differ.iter().all(|(p, x, y)| {
-                                        // A deletion the combined diff loses
-                                        // because it records the path as a
-                                        // directory instead: a deleted file
-                                        // as a deleted dir, or a file deleted
-                                        // and then re-added as a dir.
-                                        let lost_delete = x.is_some()
-                                            && y.is_none()
-                                            && d.files
-                                                .iter()
-                                                .chain(&d2.files)
-                                                .any(|f| f.deleted && f.path == **p)
-                                            && comb.dirs.iter().any(|e| e.path == **p)
-                                            && !comb.files.iter().any(|f| f.path == **p);
-                                        dir_change(p) || lost_delete
-                                    }));
+                                && (differ.iter().all(|(p, x, y)| {
+                                    // A deletion the combined diff loses
+                                    // because it records the path as a
+                                    // directory instead: a deleted file
+                                    // as a deleted dir, or a file deleted
+                                    // and then re-added as a dir.
+                                    let lost_delete = x.is_some()
+                                        && y.is_none()
+                                        && d.files
+                                            .iter()
+                                            .chain(&d2.files)
+                                            .any(|f| f.deleted && f.path == **p)
+                                        && comb.dirs.iter().any(|e| e.path == **p)
+                                        && !comb.files.iter().any(|f| f.path == **p);
+                                    dir_change(p) || lost_delete
+                                }));
                             if !known {
                                 oracle!(
                                     differ.is_empty(),
@@ -757,19 +754,56 @@ pub fn ops_gen(data: &[u8]) {
         format!("{ABS_ROOT}/{}", crate::gen::manifest::rel_path(&mut u))
     };
     if let Ok(sub) = subtree_snapshot(&a, &sub_root, policy) {
-        let nested_symlink = matches!(
+        let style_mismatch = matches!(
             sub.validate(),
             Err(openjd_snapshots::SnapshotError::Validation(ref m)) if m.contains("symlink_target path style mismatch")
         );
-        if nested_symlink {
-            known_issue!(
-                "snapshots-collapse-nested-symlink",
-                false,
-                "subtree({sub_root:?}, {policy}) produced an invalid manifest: {:?}\na={:?}\nsub={:?}",
-                sub.validate(),
-                a.files,
-                sub.files
-            );
+        // The symlinks a relative subtree cannot hold, each with the input
+        // symlink at the same path (if there is one).
+        let bad: Vec<_> = sub
+            .files
+            .iter()
+            .filter_map(|f| {
+                let t = f.symlink_target.as_deref()?;
+                (t.is_empty() || t.starts_with('/')).then(|| {
+                    let orig = format!("{sub_root}/{}", f.path);
+                    let src = a.files.iter().find(|g| g.path == orig && !g.deleted);
+                    (t, src.and_then(|g| g.symlink_target.as_deref()))
+                })
+            })
+            .collect();
+        let collapsing = matches!(
+            policy,
+            SymlinkPolicy::CollapseEscaping | SymlinkPolicy::CollapseAll
+        );
+        // A symlink to the subtree root itself gets an empty target.
+        let root_target =
+            |&(t, src): &(&str, Option<&str>)| t.is_empty() && src == Some(&*sub_root);
+        // Collapsing pulls a symlinked dir's contents in, and a symlink
+        // inside it keeps its absolute target: it has no symlink at the
+        // same path in the input. A symlink that was already in the subtree
+        // must be relativized.
+        let nested =
+            |&(t, src): &(&str, Option<&str>)| collapsing && !t.is_empty() && src.is_none();
+        if style_mismatch && !bad.is_empty() && bad.iter().all(|b| root_target(b) || nested(b)) {
+            for (id, hit) in [
+                (
+                    "snapshots-subtree-root-symlink-empty-target",
+                    bad.iter().any(root_target),
+                ),
+                ("snapshots-collapse-nested-symlink", bad.iter().any(nested)),
+            ] {
+                if hit {
+                    crate::known::hit(id, || {
+                        format!(
+                            "subtree({sub_root:?}, {policy}) produced an invalid manifest: {:?}\na={:?}\nsub={:?}",
+                            sub.validate(),
+                            a.files,
+                            sub.files
+                        )
+                    });
+                }
+            }
         } else if file_is_ancestor(&a) {
             known_issue!(
                 "snapshots-file-as-ancestor",

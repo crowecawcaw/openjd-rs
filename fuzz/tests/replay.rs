@@ -341,6 +341,56 @@ fn expression_dictionary_covers_the_library() {
 
 /// Text in string literals is not code: it must not switch on a known-issue
 /// gate and mask a real static/run-time disagreement.
+/// Text Facts: only `a if c else b` is a conditional, not a comprehension
+/// filter.
+#[test]
+fn conditional_expressions() {
+    use openjd_fuzz::targets::expr::has_conditional_expr as cond;
+    for yes in [
+        "a if c else b",
+        "[x if x > 1 else 0 for x in L]",
+        "f(a if c else b)",
+        "[x for x in L if (1 if c else 2)]",
+    ] {
+        assert!(cond(yes), "{yes}");
+    }
+    for no in [
+        "[x for x in L if c]",
+        "[upper(x) for x in [1] if True]",
+        "[x for x in L if c] + [y]",
+        "a else b",
+    ] {
+        assert!(!cond(no), "{no}");
+    }
+}
+
+/// The `expr-range-slice-static-type` gate: any step but a non-negative
+/// literal may be negative, whether it is written with `-` or not.
+#[test]
+fn negative_step_slices() {
+    use openjd_fuzz::targets::expr::has_negative_step_slice as neg;
+    for may in [
+        "R[::-1]",
+        "R[1:2:Param.N]",
+        "R[::int(  )]",
+        "R[::(0-1)]",
+        "f(R[::x])[0]",
+    ] {
+        assert!(neg(may), "{may}");
+    }
+    for not in [
+        "R[::2]",
+        "R[1:2:]",
+        "R[::None]",
+        "R[1:2]",
+        "R[0]",
+        "f(a, b)[::1]",
+        "R[g(1:2)]",
+    ] {
+        assert!(!neg(not), "{not}");
+    }
+}
+
 #[test]
 fn text_facts_ignore_string_literals() {
     use openjd_fuzz::targets::expr::Facts;
