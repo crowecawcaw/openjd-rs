@@ -524,11 +524,14 @@ pub(crate) fn check_static_miss(e: &ExpressionError, facts: Facts, msg: impl FnO
         crate::known::hit("expr-runtime-dispatch-miss", msg);
     } else if is_ordering_type_error(e) {
         crate::known::hit("expr-ordering-runtime-type-check", msg);
-    } else if (facts.union || facts.conditional)
-        && matches!(e.kind(), ExpressionErrorKind::Other(m) if m.starts_with("No matching signature for "))
-    {
-        // A union argument (`'a' if c else 3`) satisfied one overload
-        // statically; the run-time member has none.
+    } else if (facts.union || facts.conditional) && {
+        // A function's or an operator's dispatch miss.
+        let m = e.message();
+        m.starts_with("No matching signature for ")
+            || (m.starts_with("Cannot use '") && m.contains("' operator with "))
+    } {
+        // A union argument (`'a' if c else 3`, `x ** Param.N`) satisfied one
+        // overload statically; the run-time member has none.
         crate::known::hit("expr-union-arg-overload", msg);
     } else if is_non_iterable_error(e) && !facts.generated {
         crate::known::hit("expr-listcomp-non-iterable-runtime-check", msg);

@@ -169,7 +169,9 @@ pub mod known {
              #462. What remains: a conditional with branches of different types passed to a \
              function that takes one of them validates and finds no run-time signature: \
              `upper(1 if Param.B else 'a')` is `string` statically and fails with `No \
-             matching signature for upper(int)` when `Param.B` is true.",
+             matching signature for upper(int)` when `Param.B` is true. Operators too: `L * (n ** \
+             Param.N)` is typed with the `int` member of `int | float`, and fails with \
+             `Cannot use '*' operator with list[string] and float` when the power is a float.",
         ),
         (
             "expr-range-slice-static-type",
