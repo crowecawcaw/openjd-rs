@@ -235,7 +235,8 @@ fn v2023_diff_roundtrip(m: &openjd_snapshots::SnapshotDiff, what: &str) {
                 m.file_chunk_size_bytes != -1
                     || (has_hashless_file(&m.files) && e.to_string().contains("is missing a hash"))
                     || e.to_string().contains("symlink")
-                    || e.to_string().contains("exceeds the u64 range"),
+                    // The file sizes sum past u64::MAX (#515).
+                    || e.to_string().contains("the file sizes sum past u64::MAX"),
                 "{what}: a valid diff fails to encode as v2023: {e}"
             );
             return;

@@ -208,12 +208,6 @@ pub mod known {
              to change too.",
         ),
         (
-            "model-float-range-unchecked-scope",
-            "FLOAT task-parameter ranges skip the symbol-scope check INT/STRING/PATH ranges get: \
-             `[1.5, \"{{Param.X}}\"]` with no `X` passes validation and fails in create_job. \
-             Existing tests assert the current behavior; needs a spec/Python parity decision.",
-        ),
-        (
             "model-preprocess-path-idempotence",
             "`preprocess_job_parameters` is not idempotent for PATH / LIST[PATH] values (related \
              to #388): without the EXPR extension, a URI default such as `s3://bucket/x` \

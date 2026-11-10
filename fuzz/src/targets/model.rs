@@ -297,16 +297,6 @@ pub fn pipeline(
                         false,
                         "template validated but create_job fails with a static error: {x}"
                     );
-                } else if crate::targets::expr::is_name_error(x)
-                    && float_format_ranges(template)
-                        .iter()
-                        .any(|r| x.expr().is_none_or(|e| r.contains(e)))
-                {
-                    known_issue!(
-                        "model-float-range-unchecked-scope",
-                        false,
-                        "template validated but create_job fails with a static error: {x}"
-                    );
                 } else {
                     oracle!(
                         false,
@@ -510,29 +500,6 @@ fn set_eq(a: &TaskParameterSet, b: &TaskParameterSet) -> bool {
             b.get(k)
                 .is_some_and(|vb| va.param_type == vb.param_type && va.value.equals(&vb.value))
         })
-}
-
-/// The raw text of every FLOAT task-parameter range format string (see
-/// known issue `model-float-range-unchecked-scope`: only a name error in
-/// one of these is explained by it).
-fn float_format_ranges(t: &JobTemplate) -> Vec<&str> {
-    use openjd_model::template::{FloatRange, FloatRangeItem, TaskParameterDefinition};
-    let mut out = Vec::new();
-    for ps in t.steps.iter().filter_map(|s| s.parameter_space.as_ref()) {
-        for d in &ps.task_parameter_definitions {
-            let TaskParameterDefinition::FLOAT(f) = d else {
-                continue;
-            };
-            match &f.range {
-                FloatRange::Expression(fs) => out.push(fs.raw()),
-                FloatRange::List(items) => out.extend(items.iter().filter_map(|i| match i {
-                    FloatRangeItem::FormatString(fs) => Some(fs.raw()),
-                    FloatRangeItem::Float(_) => None,
-                })),
-            }
-        }
-    }
-    out
 }
 
 /// The strings of a PATH / STRING value or list (as preprocessing sees them).
