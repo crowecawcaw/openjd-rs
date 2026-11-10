@@ -1581,7 +1581,7 @@ fn check_range(r: &RangeExpr, ctl: &[u8]) {
 
     let values: Vec<i64> = r.iter().collect();
     oracle!(
-        values.len() == len,
+        values.len() as u64 == len,
         "len {len} != iterated {}",
         values.len()
     );
@@ -1687,7 +1687,7 @@ pub fn int_range(data: &[u8]) {
     let len = ir.len();
     oracle!(ir.is_empty() == (len == 0), "is_empty disagrees with len");
     for (i, v) in ir.iter().take(64).enumerate() {
-        oracle!(ir.get(i) == Some(v), "get({i}) != iter");
+        oracle!(ir.get(i as u64) == Some(v), "get({i}) != iter");
         oracle!(ir.contains(v), "contains({v}) false for a member");
     }
     if len > 0 {

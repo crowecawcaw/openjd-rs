@@ -568,7 +568,7 @@ fn check_param_space(step: &Step) -> Vec<TaskParameterSet> {
     }
     if !adaptive && len <= 2000 {
         oracle!(
-            walked.len() == len,
+            walked.len() as u64 == len,
             "step {:?}: len() = {len} but iteration yields {}",
             step.name,
             walked.len()
@@ -583,7 +583,7 @@ fn check_param_space(step: &Step) -> Vec<TaskParameterSet> {
     );
     for (i, set) in walked.iter().enumerate().take(64) {
         if !adaptive {
-            let got = it.get(i);
+            let got = it.get(i as u64);
             oracle!(
                 got.as_ref().is_some_and(|g| set_eq(g, set)),
                 "step {:?}: get({i}) = {got:?} but iteration gives {set:?}",
