@@ -28,7 +28,10 @@ on:
     inputs:
       seconds:
         description: Seconds to fuzz each target
-        default: "600"
+        default: "60"
+      targets:
+        description: Targets to fuzz, space-separated (empty means every target)
+        default: ""
 
 # One group per event type, so a long nightly run never queues main's push
 # run (or the reverse).
@@ -107,8 +110,9 @@ jobs:
     name: Fuzz
     runs-on: ubuntu-latest
     # Nightly: FUZZ_SECONDS_NIGHTLY for each target, plus the build and the
-    # corpus minimization.
-    timeout-minutes: 60
+    # corpus minimization. A manual run gets the 6 h maximum, since it picks
+    # its own seconds and targets: keep seconds x targets well inside it.
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 360 || 60 }}
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Install rust nightly
@@ -150,14 +154,24 @@ jobs:
           FUZZ_SECONDS: ${{ github.event_name == 'schedule' && env.FUZZ_SECONDS_NIGHTLY || github.event_name == 'workflow_dispatch' && inputs.seconds || env.FUZZ_SECONDS_PR }}
           # Two libFuzzer workers per target on the 4-core runner.
           FUZZ_JOBS: 2
-        # No target list: every target `cargo fuzz list` knows (which
-        # tests/replay.rs keeps equal to targets::TARGETS).
-        run: scripts/fuzz.sh run
+          # Empty except on a manual run that names targets. Empty runs every
+          # target `cargo fuzz list` knows (which tests/replay.rs keeps equal
+          # to targets::TARGETS).
+          FUZZ_TARGETS: ${{ inputs.targets }}
+        run: |
+          # Unquoted on purpose: split the space-separated target list.
+          # shellcheck disable=SC2086
+          scripts/fuzz.sh run $FUZZ_TARGETS
       # Keep the cached corpus small: minimize it before saving, so it does
       # not grow without bound across runs.
       - name: Minimize grown corpus
         if: always() && github.event_name != 'pull_request'
-        run: scripts/fuzz.sh cmin-work
+        env:
+          FUZZ_TARGETS: ${{ inputs.targets }}
+        run: |
+          # Unquoted on purpose: split the space-separated target list.
+          # shellcheck disable=SC2086
+          scripts/fuzz.sh cmin-work $FUZZ_TARGETS
       # The grown corpus as an artifact, to fold into fuzz/corpus with
       # `FUZZ_WORK_DIR=<download> scripts/fuzz.sh cmin`.
       - name: Upload grown corpus

@@ -169,7 +169,8 @@ fn fuzz_lock_matches_workspace_lock() {
 }
 
 /// Every target is fuzzed in CI: the `fuzz` job runs `scripts/fuzz.sh run`
-/// with no target list, which fuzzes every target `cargo fuzz list` knows
+/// with a target list that only a manual run's `targets` input can fill, and
+/// an empty list fuzzes every target `cargo fuzz list` knows
 /// (`registry_matches_bins_files_and_corpus` keeps those equal to
 /// `targets::TARGETS`).
 #[test]
@@ -179,10 +180,21 @@ fn ci_fuzzes_every_target() {
     let steps = doc["jobs"]["fuzz"]["steps"]
         .as_array()
         .expect("fuzz.yml: jobs.fuzz.steps");
-    let runs: Vec<&str> = steps.iter().filter_map(|s| s["run"].as_str()).collect();
-    assert!(
-        runs.iter().any(|r| r.trim() == "scripts/fuzz.sh run"),
-        "fuzz.yml's fuzz job must run `scripts/fuzz.sh run` with no target list: {runs:?}"
+    let fuzz = steps
+        .iter()
+        .find(|s| s["name"] == "Fuzz")
+        .expect("fuzz.yml: the fuzz job's `Fuzz` step");
+    assert_eq!(
+        fuzz["run"]
+            .as_str()
+            .and_then(|r| r.lines().map(str::trim).next_back()),
+        Some("scripts/fuzz.sh run $FUZZ_TARGETS"),
+        "fuzz.yml's Fuzz step"
+    );
+    assert_eq!(
+        fuzz["env"]["FUZZ_TARGETS"].as_str(),
+        Some("${{ inputs.targets }}"),
+        "fuzz.yml's Fuzz step: FUZZ_TARGETS must be empty except on a manual run"
     );
     assert!(
         doc["jobs"]["fuzz"]["strategy"].is_null(),
