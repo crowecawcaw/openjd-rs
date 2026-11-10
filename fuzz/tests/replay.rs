@@ -168,32 +168,25 @@ fn fuzz_lock_matches_workspace_lock() {
     );
 }
 
-/// Every target is fuzzed in CI: it appears in exactly one group of the
-/// `fuzz` job's matrix in fuzz.yml, and no group names an unknown target.
+/// Every target is fuzzed in CI: the `fuzz` job runs `scripts/fuzz.sh run`
+/// with no target list, which fuzzes every target `cargo fuzz list` knows
+/// (`registry_matches_bins_files_and_corpus` keeps those equal to
+/// `targets::TARGETS`).
 #[test]
-fn every_target_is_in_one_ci_group() {
+fn ci_fuzzes_every_target() {
     let wf = std::fs::read_to_string(root().join("../.github/workflows/fuzz.yml")).unwrap();
     let doc: serde_json::Value = serde_saphyr::from_str(&wf).unwrap();
-    let include = doc["jobs"]["fuzz"]["strategy"]["matrix"]["include"]
+    let steps = doc["jobs"]["fuzz"]["steps"]
         .as_array()
-        .expect("fuzz.yml: jobs.fuzz.strategy.matrix.include");
-    let mut seen: Vec<String> = Vec::new();
-    for group in include {
-        let list = group["targets"]
-            .as_str()
-            .expect("matrix entry without targets");
-        seen.extend(list.split_whitespace().map(str::to_string));
-    }
-    let registry = names(TARGETS.iter().map(|(n, _)| n.to_string()));
-    let in_ci = names(seen.iter().cloned());
-    assert_eq!(
-        registry, in_ci,
-        "targets::TARGETS vs fuzz.yml matrix targets"
+        .expect("fuzz.yml: jobs.fuzz.steps");
+    let runs: Vec<&str> = steps.iter().filter_map(|s| s["run"].as_str()).collect();
+    assert!(
+        runs.iter().any(|r| r.trim() == "scripts/fuzz.sh run"),
+        "fuzz.yml's fuzz job must run `scripts/fuzz.sh run` with no target list: {runs:?}"
     );
-    assert_eq!(
-        seen.len(),
-        in_ci.len(),
-        "a target is listed in more than one fuzz.yml group: {seen:?}"
+    assert!(
+        doc["jobs"]["fuzz"]["strategy"].is_null(),
+        "fuzz.yml's fuzz job is one job over every target, not a matrix"
     );
 }
 

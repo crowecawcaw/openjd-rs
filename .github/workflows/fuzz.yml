@@ -6,12 +6,12 @@ name: Fuzz
 #                 oracle, on Linux, macOS, and Windows (stable Rust, overflow
 #                 checks on). Fast and deterministic: a PR that breaks a
 #                 previously found bug or an oracle fails here.
-# - fuzz:         libFuzzer under AddressSanitizer, one job per target group.
-#                 Each target grows a corpus that is cached across runs (saved
-#                 from main and the nightly schedule), so coverage accumulates
-#                 instead of restarting from the seeds every time. PRs fuzz
-#                 each target for FUZZ_SECONDS_PR; the nightly run for
-#                 FUZZ_SECONDS_NIGHTLY.
+# - fuzz:         libFuzzer under AddressSanitizer, every target in turn in
+#                 one job. Each target grows a corpus that is cached across
+#                 runs (saved from main and the nightly schedule), so coverage
+#                 accumulates instead of restarting from the seeds every time.
+#                 PRs fuzz each target for FUZZ_SECONDS_PR; the nightly run
+#                 for FUZZ_SECONDS_NIGHTLY.
 # - api-coverage: every public function of openjd-expr / -model / -sessions /
 #                 -snapshots must be executed by the committed corpus (llvm
 #                 source coverage of the replay), or be excluded with a reason
@@ -47,8 +47,11 @@ env:
   # Pinned so a broken nightly cannot randomly fail the job; bump deliberately
   # (and keep scripts/fuzz.sh and scripts/check_fuzz_api_coverage.py in step).
   FUZZ_TOOLCHAIN: nightly-2026-10-07
-  FUZZ_SECONDS_PR: 90
-  FUZZ_SECONDS_NIGHTLY: 1200
+  # Per target, run one after another (21 targets: ~5 min on a PR, ~20 min
+  # nightly). The committed corpus is a good start and the grown corpus is
+  # cached across runs, so short runs keep accumulating coverage.
+  FUZZ_SECONDS_PR: 15
+  FUZZ_SECONDS_NIGHTLY: 60
 
 jobs:
   replay:
@@ -101,26 +104,11 @@ jobs:
           cargo +nightly fmt --manifest-path fuzz/Cargo.toml --all -- --check
 
   fuzz:
-    name: Fuzz (${{ matrix.group }})
+    name: Fuzz
     runs-on: ubuntu-latest
-    timeout-minutes: 150
-    strategy:
-      fail-fast: false
-      # At most 5 targets per group, so the nightly run (FUZZ_SECONDS_NIGHTLY
-      # per target) stays well inside timeout-minutes. tests/replay.rs checks
-      # that every target is in exactly one group.
-      matrix:
-        include:
-          - group: expr-eval
-            targets: expr_eval_text expr_eval_gen expr_format_string expr_function_call
-          - group: expr-values
-            targets: expr_parse expr_range expr_int_range expr_type
-          - group: expr-data-cli
-            targets: expr_value expr_path expr_symbol_table cli_args
-          - group: model
-            targets: model_decode_text model_job_gen model_env_gen model_misc
-          - group: sessions-snapshots
-            targets: sessions_directives sessions_framer sessions_embedded_files snapshots_decode_text snapshots_ops_gen
+    # Nightly: FUZZ_SECONDS_NIGHTLY for each target, plus the build and the
+    # corpus minimization.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Install rust nightly
@@ -150,8 +138,8 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: fuzz/work
-          key: fuzz-corpus-${{ matrix.group }}-${{ github.run_id }}
-          restore-keys: fuzz-corpus-${{ matrix.group }}-
+          key: fuzz-corpus-all-${{ github.run_id }}
+          restore-keys: fuzz-corpus-all-
       - name: Sync fuzz/Cargo.lock to the workspace lock
         # Dependabot bumps only the workspace lock; build against the
         # versions the crates ship with either way.
@@ -162,19 +150,21 @@ jobs:
           FUZZ_SECONDS: ${{ github.event_name == 'schedule' && env.FUZZ_SECONDS_NIGHTLY || github.event_name == 'workflow_dispatch' && inputs.seconds || env.FUZZ_SECONDS_PR }}
           # Two libFuzzer workers per target on the 4-core runner.
           FUZZ_JOBS: 2
-        run: scripts/fuzz.sh run ${{ matrix.targets }}
+        # No target list: every target `cargo fuzz list` knows (which
+        # tests/replay.rs keeps equal to targets::TARGETS).
+        run: scripts/fuzz.sh run
       # Keep the cached corpus small: minimize it before saving, so it does
       # not grow without bound across runs.
       - name: Minimize grown corpus
         if: always() && github.event_name != 'pull_request'
-        run: scripts/fuzz.sh cmin-work ${{ matrix.targets }}
+        run: scripts/fuzz.sh cmin-work
       # The grown corpus as an artifact, to fold into fuzz/corpus with
       # `FUZZ_WORK_DIR=<download> scripts/fuzz.sh cmin`.
       - name: Upload grown corpus
         if: always() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-corpus-${{ matrix.group }}
+          name: fuzz-corpus
           path: fuzz/work
           retention-days: 14
           if-no-files-found: ignore
@@ -183,12 +173,12 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: fuzz/work
-          key: fuzz-corpus-${{ matrix.group }}-${{ github.run_id }}
+          key: fuzz-corpus-all-${{ github.run_id }}
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-artifacts-${{ matrix.group }}
+          name: fuzz-artifacts
           path: fuzz/artifacts
           if-no-files-found: ignore
 

@@ -114,8 +114,8 @@ Each check below is executable, and each was verified to fail when broken:
   (`known_issue_reproducers_reproduce`), so a fixed bug fails until its gate
   becomes an `oracle!`. A `--posix-host` / `--windows-host` note marks a
   reproducer that depends on the host's path format; it runs only there.
-- **Every target is fuzzed in CI.** Each registered target appears in exactly
-  one `fuzz.yml` matrix group (`every_target_is_in_one_ci_group`).
+- **Every target is fuzzed in CI.** The `fuzz.yml` fuzz job runs every
+  registered target in turn (`ci_fuzzes_every_target`).
 - **Public API coverage** (`scripts/check_fuzz_api_coverage.py`). rustdoc JSON
   enumerates, for every workspace library crate (new crates included unless
   opted out in the script's `NOT_GATED`), every public free function, inherent
@@ -159,10 +159,10 @@ the entry, so the fuzzer guards the fix.
    `[[bin]]` entry (copy an existing one).
 3. Seed it: extend `examples/build_corpus.rs` or drop files into
    `corpus/my_target/`, then `scripts/fuzz.sh cmin my_target`.
-4. Add it to a group in `.github/workflows/fuzz.yml`.
+CI fuzzes it from then on: the `fuzz.yml` fuzz job runs every target.
 
 `cargo test --manifest-path fuzz/Cargo.toml --no-default-features` fails
-until all four steps agree.
+until all three steps agree.
 
 ## When the fuzzer finds a bug
 
