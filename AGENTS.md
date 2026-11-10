@@ -1,5 +1,12 @@
 # AGENTS.md
 
+> **STOP.** Before you change anything in this repository, open and follow
+> [`skills/implement-change/SKILL.md`](skills/implement-change/SKILL.md). This
+> applies to every change, docs included, and even when this repository is not
+> your working directory. If you have already started, stop and go through the
+> skill from its first step. Details are in "Required: Every Change Uses the
+> `implement-change` Skill" below.
+
 ## Project Overview
 
 openjd-rs is a Rust implementation of the [Open Job Description](https://github.com/OpenJobDescription) specification. It provides a model library, expression language, sessions runtime, job attachments snapshots, and CLI for working with OpenJD job templates.
@@ -138,7 +145,7 @@ Spec entry point: `specs/snapshots/README.md`
 surface, the Rust API, the WASM package layout, and the build pipeline may
 all change without notice.
 
-ECMAScript/WebAssembly bindings for `openjd-model` and `openjd-expr`. Depends on both via Cargo, compiles to `wasm32-unknown-unknown`, and produces an npm package via `wasm-bindgen`. Source is Rust (`src/lib.rs`, `src/model.rs`, `src/expr.rs`, `src/errors.rs`) alongside npm manifest, Vitest config, and JS-side integration tests (`js-tests/`).
+ECMAScript/WebAssembly bindings for `openjd-model` and `openjd-expr`. Depends on both via Cargo, compiles to `wasm32-unknown-unknown`, and produces an npm package via `wasm-bindgen`. Source is Rust (`src/lib.rs`, `src/model.rs`, `src/expr.rs`, `src/errors.rs`) alongside npm manifest, Vitest config, JS-side integration tests (`js-tests/`), and a hand-written package entry point (`index.js`, `index.d.ts`) that wraps the generated `pkg/` so `evaluate` borrows the `FunctionLibrary` it is given.
 
 Spec entry point: `specs/openjd-for-js/spec.md`
 

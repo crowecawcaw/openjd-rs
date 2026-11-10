@@ -299,6 +299,16 @@ describe("parseRangeExpr", () => {
     const result = mod.parseRangeExpr("1-10:3");
     expect(Array.from(result)).toEqual([1n, 4n, 7n, 10n]);
   });
+
+  it("refuses to materialize more values than the operation limit", () => {
+    expect(() => mod.parseRangeExpr("1-10000001")).toThrow(
+      new Error("Range expression has too many elements to materialize (10000001 > 10000000)")
+    );
+    // The exact count, past what a wasm32 usize can hold.
+    expect(() => mod.parseRangeExpr("1-5000000000")).toThrow(
+      new Error("Range expression has too many elements to materialize (5000000000 > 10000000)")
+    );
+  });
 });
 
 describe("range_expr values", () => {
@@ -353,6 +363,206 @@ describe("FunctionLibrary.withPathMappingRules", () => {
     v.free();
     parsed.free();
     st.free();
+    lib.free();
+  });
+
+  it("is borrowed, not used up, by evaluate and evaluateExpression", () => {
+    const lib = mod.FunctionLibrary.withPathMappingRules([
+      new mod.PathMappingRule(mod.PathFormat.Posix, "/mnt", "/local"),
+    ]);
+    const st = new mod.SymbolTable();
+    const parsed = mod.parseExpression("apply_path_mapping('/mnt/f.txt')");
+    const opts = { operationLimit: 100_000 };
+    const results = [
+      parsed.evaluate(st, lib),
+      parsed.evaluate(st, lib, opts),
+      mod.evaluateExpression("apply_path_mapping('/mnt/g.txt')", st, lib),
+      mod.evaluateExpression("apply_path_mapping('/mnt/g.txt')", st, lib, opts),
+    ];
+    expect(results.map((r) => r.toString())).toEqual([
+      "/local/f.txt",
+      "/local/f.txt",
+      "/local/g.txt",
+      "/local/g.txt",
+    ]);
+    results.forEach((r) => r.free());
+    parsed.free();
+    st.free();
+    // The caller still owns the library, so freeing it works.
+    expect(() => lib.free()).not.toThrow();
+  });
+
+  it("leaves the caller's PathMappingRule objects usable", () => {
+    const rule = new mod.PathMappingRule(mod.PathFormat.Posix, "/mnt", "/local");
+    const first = mod.FunctionLibrary.withPathMappingRules([rule]);
+    const second = mod.FunctionLibrary.withPathMappingRules([rule]);
+    const st = new mod.SymbolTable();
+    const v = mod.evaluateExpression("apply_path_mapping('/mnt/f')", st, second);
+    expect(v.toString()).toBe("/local/f");
+    v.free();
+    st.free();
+    first.free();
+    second.free();
+    expect(() => rule.free()).not.toThrow();
+  });
+
+  it("treats a null or omitted library as the default library", () => {
+    const st = new mod.SymbolTable();
+    const parsed = mod.parseExpression("1 + 1");
+    for (const r of [
+      parsed.evaluate(st),
+      parsed.evaluate(st, null),
+      parsed.evaluate(st, undefined, { operationLimit: 1_000 }),
+      mod.evaluateExpression("1 + 1", st, null),
+    ]) {
+      expect(r.toString()).toBe("2");
+      r.free();
+    }
+    parsed.free();
+    st.free();
+  });
+
+  it("rejects a library argument that is not a FunctionLibrary", () => {
+    const st = new mod.SymbolTable();
+    const parsed = mod.parseExpression("1 + 1");
+    expect(() => parsed.evaluate(st, {})).toThrow("expected instance of FunctionLibrary");
+    expect(() => mod.evaluateExpression("1", st, {})).toThrow(
+      "expected instance of FunctionLibrary",
+    );
+    parsed.free();
+    st.free();
+  });
+
+  it("rejects a freed library before calling into wasm", () => {
+    const st = new mod.SymbolTable();
+    const parsed = mod.parseExpression("1 + 1");
+    const lib = mod.getDefaultLibrary();
+    lib.free();
+    const forged = Object.create(mod.FunctionLibrary.prototype);
+    for (const bad of [lib, forged]) {
+      for (const [call, caller] of [
+        [() => parsed.evaluate(st, bad), "ParsedExpression.evaluate"],
+        [() => parsed.evaluate(st, bad, { operationLimit: 10 }), "ParsedExpression.evaluate"],
+        [() => mod.evaluateExpression("1 + 1", st, bad), "evaluateExpression"],
+      ]) {
+        let error;
+        try {
+          call();
+        } catch (e) {
+          error = e;
+        }
+        expect(error).toBeInstanceOf(TypeError);
+        expect(error.message).toBe(`${caller}: lib has been freed`);
+      }
+    }
+    // Inside wasm, the error left `parsed` marked as borrowed, so freeing
+    // it threw "attempted to take ownership of Rust value while it was
+    // borrowed".
+    expect(() => parsed.free()).not.toThrow();
+    st.free();
+  });
+
+  it("survives many calls with a freed library", () => {
+    // Inside wasm, call 8,187 failed with "memory access out of bounds".
+    const st = new mod.SymbolTable();
+    const parsed = mod.parseExpression("1 + 1");
+    const lib = mod.getDefaultLibrary();
+    lib.free();
+    for (let n = 0; n < 30_000; n++) {
+      expect(() => parsed.evaluate(st, lib)).toThrow(TypeError);
+      expect(() => mod.evaluateExpression("1 + 1", st, lib)).toThrow(TypeError);
+    }
+    const good = mod.getDefaultLibrary();
+    const r = parsed.evaluate(st, good);
+    expect(r.toString()).toBe("2");
+    r.free();
+    good.free();
+    parsed.free();
+    st.free();
+  });
+  it("rejects an argument that is not an iterable of live PathMappingRules", () => {
+    const rule = new mod.PathMappingRule(mod.PathFormat.Posix, "/mnt", "/local");
+    const freed = new mod.PathMappingRule(mod.PathFormat.Posix, "/b", "/y");
+    freed.free();
+    const forged = Object.create(mod.PathMappingRule.prototype);
+    const fakePointer = Object.create(mod.PathMappingRule.prototype);
+    fakePointer.__wbg_ptr = "x";
+    const freedDuringIteration = () => {
+      const victim = new mod.PathMappingRule(mod.PathFormat.Posix, "/v", "/w");
+      return (function* () {
+        yield victim;
+        victim.free();
+        yield rule;
+      })();
+    };
+    const prefix = "FunctionLibrary.withPathMappingRules: ";
+    const cases = [
+      ...[undefined, null, 5, {}, rule].map((arg) => [
+        arg,
+        "rules must be an array (or other iterable) of PathMappingRule",
+      ]),
+      [[rule, {}], "rules[1] is not a PathMappingRule"],
+      [[null], "rules[0] is not a PathMappingRule"],
+      [[freed], "rules[0] has been freed"],
+      [[rule, forged], "rules[1] has been freed"],
+      [[fakePointer], "rules[0] has been freed"],
+      [freedDuringIteration(), "rules[0] has been freed"],
+    ];
+    for (const [arg, message] of cases) {
+      let error;
+      try {
+        mod.FunctionLibrary.withPathMappingRules(arg);
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(TypeError);
+      expect(error.message).toBe(prefix + message);
+    }
+    // A rejected call leaves the caller's rule usable.
+    const lib = mod.FunctionLibrary.withPathMappingRules(new Set([rule]));
+    const st = new mod.SymbolTable();
+    const v = mod.evaluateExpression("apply_path_mapping('/mnt/f')", st, lib);
+    expect(v.toString()).toBe("/local/f");
+    v.free();
+    st.free();
+    lib.free();
+    rule.free();
+  });
+
+  it("survives many rejected calls", () => {
+    // A wasm-bindgen error thrown from inside wasm (a wrong-typed element in
+    // the rules array, or a freed rule) left the wasm heap inconsistent, and
+    // some thousands of them failed with "memory access out of bounds".
+    const a = new mod.PathMappingRule(mod.PathFormat.Posix, "/a", "/x");
+    const b = new mod.PathMappingRule(mod.PathFormat.Posix, "/b", "/y");
+    const freed = new mod.PathMappingRule(mod.PathFormat.Posix, "/c", "/z");
+    freed.free();
+    const forged = Object.create(mod.PathMappingRule.prototype);
+    const bad = [[{}, a, b], [a, {}, b], [a, b, {}], [a, freed], [freed, a], [a, forged]];
+    // Frees a rule it already yielded, after the element check saw it live.
+    const freesWhileIterating = () => {
+      const victim = new mod.PathMappingRule(mod.PathFormat.Posix, "/v", "/w");
+      return (function* () {
+        yield a;
+        yield victim;
+        victim.free();
+        yield b;
+      })();
+    };
+    for (let n = 0; n < 30_000; n++) {
+      for (const rules of [...bad, freesWhileIterating()]) {
+        expect(() => mod.FunctionLibrary.withPathMappingRules(rules)).toThrow(TypeError);
+      }
+    }
+    const lib = mod.FunctionLibrary.withPathMappingRules([a, b]);
+    const st = new mod.SymbolTable();
+    const v = mod.evaluateExpression("apply_path_mapping('/b/f')", st, lib);
+    expect(v.toString()).toBe("/y/f");
+    v.free();
+    st.free();
+    lib.free();
+    a.free();
+    b.free();
   });
 
   it("throws for a relative source path, naming the rule", () => {
@@ -834,6 +1044,31 @@ describe("evaluateExpression EvalOptions enforcement (F5)", () => {
 });
 
 describe("ParsedExpression.evaluate EvalOptions enforcement (F5)", () => {
+  it("applies options when a library is passed", () => {
+    const st = new mod.SymbolTable();
+    const lib = mod.getDefaultLibrary();
+    const ops = "sum([i for i in range(100)])";
+    const opsError =
+      "Expression operation count (11) exceeded limit (10)\n" +
+      "  sum([i for i in range(100)])\n" +
+      "                  ^~~~~~~~~~";
+    const mem = "'x' * 1000000";
+    const memError =
+      "Expression memory usage (1000088 bytes) exceeded limit (1000 bytes)\n" +
+      "  'x' * 1000000\n" +
+      "  ~~~~^~~~~~~~~";
+    const parsedOps = mod.parseExpression(ops);
+    const parsedMem = mod.parseExpression(mem);
+    expect(() => parsedOps.evaluate(st, lib, { operationLimit: 10 })).toThrow(opsError);
+    expect(() => mod.evaluateExpression(ops, st, lib, { operationLimit: 10 })).toThrow(opsError);
+    expect(() => parsedMem.evaluate(st, lib, { memoryLimit: 1_000 })).toThrow(memError);
+    expect(() => mod.evaluateExpression(mem, st, lib, { memoryLimit: 1_000 })).toThrow(memError);
+    parsedOps.free();
+    parsedMem.free();
+    lib.free();
+    st.free();
+  });
+
   it("respects memoryLimit override", () => {
     const parsed = mod.parseExpression("'x' * 1000000");
     const st = new mod.SymbolTable();
@@ -857,10 +1092,6 @@ describe("ParsedExpression.evaluate EvalOptions enforcement (F5)", () => {
   it("works with a library argument and options together", () => {
     const parsed = mod.parseExpression("1 + 1");
     const st = new mod.SymbolTable();
-    // Note: passing `lib` by value to evaluate() consumes the JS
-    // handle (wasm-bindgen moves the internal pointer), so we must
-    // NOT call `.free()` on it after. The library is freed by
-    // wasm-bindgen when it's consumed.
     const lib = mod.getDefaultLibrary();
     const r = parsed.evaluate(st, lib, {
       memoryLimit: 10_000_000,
@@ -868,6 +1099,7 @@ describe("ParsedExpression.evaluate EvalOptions enforcement (F5)", () => {
     });
     expect(r.toString()).toBe("2");
     r.free();
+    lib.free();
     st.free();
     parsed.free();
   });
@@ -1031,5 +1263,391 @@ describe("supportedExtensions on decodeJobTemplateFromObject (F8)", () => {
     expect(() =>
       mod.decodeJobTemplateFromObject(obj, undefined, ["TASK_CHUNKING"])
     ).toThrow(/EXPR|extension/i);
+  });
+});
+
+describe("StepParameterSpaceIterator", () => {
+  const TEMPLATE = JSON.stringify({
+    specificationVersion: "jobtemplate-2023-09",
+    name: "T",
+    steps: [
+      {
+        name: "Frames",
+        parameterSpace: {
+          taskParameterDefinitions: [{ name: "F", type: "INT", range: "1-3" }],
+        },
+        script: { actions: { onRun: { command: "x" } } },
+      },
+      { name: "Bare", script: { actions: { onRun: { command: "x" } } } },
+    ],
+  });
+
+  const withIter = (stepName, body) => {
+    const template = mod.decodeJobTemplate(TEMPLATE);
+    const opts = new mod.PathParameterOptions("/tmpl", "/cwd");
+    const job = mod.createJob(template, {}, opts);
+    try {
+      body(() => new mod.StepParameterSpaceIterator(job, stepName));
+    } finally {
+      job.free();
+      opts.free();
+      template.free();
+    }
+  };
+
+  it("reads a step's tasks by index", () => {
+    withIter("Frames", (make) => {
+      const iter = make();
+      expect(iter.count).toBe(3n);
+      expect(iter.names).toEqual(["F"]);
+      expect(iter.get(2n).get("F")).toBe("3");
+      expect(() => iter.get(3n)).toThrow(new Error("Index 3 out of range"));
+      iter.free();
+    });
+  });
+
+  it("gives a step without a parameter space one task", () => {
+    withIter("Bare", (make) => {
+      const iter = make();
+      expect(iter.count).toBe(1n);
+      expect(iter.get(0n).size).toBe(0);
+      iter.free();
+    });
+  });
+
+  it("rejects an unknown step name", () => {
+    withIter("Nope", (make) => {
+      expect(make).toThrow(new Error("Job has no step named 'Nope'"));
+    });
+  });
+});
+
+// ── Counts above 2^32 (wasm32) ─────────────────────────────────────
+//
+// WebAssembly is a 32-bit target, so `usize` is 32 bits here. Task, chunk,
+// and value counts are 64-bit end to end; these ranges have more values
+// than a 32-bit count can hold. Each is built from text, so no test lists
+// its values.
+
+describe("task counts above 2^32 (wasm32)", () => {
+  const chunkTemplate = (range, defaultTaskCount, rangeConstraint) =>
+    JSON.stringify({
+      specificationVersion: "jobtemplate-2023-09",
+      extensions: ["TASK_CHUNKING"],
+      name: "T",
+      steps: [
+        {
+          name: "S",
+          parameterSpace: {
+            taskParameterDefinitions: [
+              {
+                name: "F",
+                type: "CHUNK[INT]",
+                range,
+                chunks: { defaultTaskCount, rangeConstraint },
+              },
+            ],
+          },
+          script: { actions: { onRun: { command: "x" } } },
+        },
+      ],
+    });
+
+  // Creates the job, runs `body(job)`, and frees everything.
+  const withJob = (templateText, limits, body) => {
+    const template = mod.decodeJobTemplate(templateText);
+    const opts = new mod.PathParameterOptions("/tmpl", "/cwd");
+    try {
+      const job = mod.createJob(template, {}, opts, limits);
+      try {
+        body(job);
+      } finally {
+        job.free();
+      }
+    } finally {
+      opts.free();
+      template.free();
+    }
+  };
+
+  // The chunk strings at `indices`, from the step's parameter space.
+  const chunksAt = (job, indices) => {
+    const iter = new mod.StepParameterSpaceIterator(job, "S");
+    try {
+      return { count: iter.count, chunks: indices.map((i) => iter.get(i).get("F")) };
+    } finally {
+      iter.free();
+    }
+  };
+
+  it("counts and splits CONTIGUOUS 1-5000000000", () => {
+    withJob(chunkTemplate("1-5000000000", 1000000000, "CONTIGUOUS"), undefined, (job) => {
+      expect(chunksAt(job, [0n, 1n, 4n])).toEqual({
+        count: 5n,
+        chunks: ["1-1000000000", "1000000001-2000000000", "4000000001-5000000000"],
+      });
+    });
+  });
+
+  it("counts and splits NONCONTIGUOUS 1-5000000000", () => {
+    withJob(chunkTemplate("1-5000000000", 1000000000, "NONCONTIGUOUS"), undefined, (job) => {
+      expect(chunksAt(job, [0n, 4n])).toEqual({
+        count: 5n,
+        chunks: ["1-1000000000", "4000000001-5000000000"],
+      });
+    });
+  });
+
+  it("counts every value of 1-4294967296 as a task", () => {
+    withJob(chunkTemplate("1-4294967296", 1, "CONTIGUOUS"), undefined, (job) => {
+      expect(chunksAt(job, [0n, 4294967295n])).toEqual({
+        count: 4294967296n,
+        chunks: ["1-1", "4294967296-4294967296"],
+      });
+    });
+  });
+
+  it("places CONTIGUOUS chunks at offsets of 2^32 and beyond", () => {
+    // An offset into an interval past 2^32 wraps a 32-bit usize: index
+    // 4294967296 of 1-5000000000 read "705032704-705032704" that way.
+    withJob(chunkTemplate("1-5000000000", 1, "CONTIGUOUS"), undefined, (job) => {
+      expect(chunksAt(job, [4294967295n, 4294967296n, 4999999999n])).toEqual({
+        count: 5000000000n,
+        chunks: ["4294967296-4294967296", "4294967297-4294967297", "5000000000-5000000000"],
+      });
+    });
+    withJob(chunkTemplate("1-10000000000", 1000000000, "CONTIGUOUS"), undefined, (job) => {
+      expect(chunksAt(job, [4n, 5n, 9n])).toEqual({
+        count: 10n,
+        chunks: ["4000000001-5000000000", "5000000001-6000000000", "9000000001-10000000000"],
+      });
+    });
+  });
+
+  it("splits 1-4294967296 into two chunks of 2^31", () => {
+    withJob(chunkTemplate("1-4294967296", 2147483648, "CONTIGUOUS"), undefined, (job) => {
+      expect(chunksAt(job, [0n, 1n])).toEqual({
+        count: 2n,
+        chunks: ["1-2147483648", "2147483649-4294967296"],
+      });
+    });
+  });
+
+  it("keeps a defaultTaskCount above 2^32", () => {
+    withJob(chunkTemplate("1-5000000000", 4294967297, "CONTIGUOUS"), undefined, (job) => {
+      expect(chunksAt(job, [0n, 1n])).toEqual({
+        count: 2n,
+        chunks: ["1-2500000000", "2500000001-5000000000"],
+      });
+      const chunks = job.toJSON().steps[0].parameterSpace.taskParameterDefinitions.get("F")
+        .chunkInt.chunks;
+      expect(chunks.defaultTaskCount).toBe(4294967297);
+    });
+  });
+
+  it("rejects an index past the last task", () => {
+    withJob(chunkTemplate("1-4294967296", 1, "CONTIGUOUS"), undefined, (job) => {
+      const iter = new mod.StepParameterSpaceIterator(job, "S");
+      try {
+        expect(() => iter.get(4294967296n)).toThrow(new Error("Index 4294967296 out of range"));
+      } finally {
+        iter.free();
+      }
+    });
+  });
+
+  it("rejects indices outside u64 instead of wrapping them", () => {
+    // A wasm-bindgen u64 parameter would wrap 2^64 to 0 (task 0) and -1 to
+    // 2^64 - 1; the index is range-checked as a bigint instead.
+    withJob(chunkTemplate("1-5000000000", 1000000000, "CONTIGUOUS"), undefined, (job) => {
+      const iter = new mod.StepParameterSpaceIterator(job, "S");
+      try {
+        expect(() => iter.get(2n ** 64n)).toThrow(new Error("Index 18446744073709551616 out of range"));
+        expect(() => iter.get(2n ** 64n + 1n)).toThrow(new Error("Index 18446744073709551617 out of range"));
+        expect(() => iter.get(-1n)).toThrow(new Error("Index -1 out of range"));
+        expect(() => iter.get(1)).toThrow(new Error("Index must be a bigint"));
+      } finally {
+        iter.free();
+      }
+    });
+  });
+
+  it("counts a product of parameters beyond 2^32", () => {
+    // 100000 x 100000 tasks: a 32-bit usize product overflowed here.
+    const template = mod.decodeJobTemplate(
+      JSON.stringify({
+        specificationVersion: "jobtemplate-2023-09",
+        name: "T",
+        steps: [
+          {
+            name: "S",
+            parameterSpace: {
+              taskParameterDefinitions: [
+                { name: "A", type: "INT", range: "1-100000" },
+                { name: "B", type: "INT", range: "1-100000" },
+              ],
+            },
+            script: { actions: { onRun: { command: "x" } } },
+          },
+        ],
+      })
+    );
+    const opts = new mod.PathParameterOptions("/tmpl", "/cwd");
+    try {
+      const job = mod.createJob(template, {}, opts);
+      const iter = new mod.StepParameterSpaceIterator(job, "S");
+      expect(iter.count).toBe(10000000000n);
+      const last = iter.get(9999999999n);
+      expect([last.get("A"), last.get("B")]).toEqual(["100000", "100000"]);
+      const middle = iter.get(4294967296n);
+      expect([middle.get("A"), middle.get("B")]).toEqual(["42950", "67297"]);
+      iter.free();
+      job.free();
+      expect(() => mod.createJob(template, {}, opts, { maxTaskCount: 1000000n })).toThrow(
+        new Error(
+          "Model validation error: 1 validation error for Template\n" +
+            "Template: Total task count (10000000000) exceeds caller limit of 1000000."
+        )
+      );
+    } finally {
+      opts.free();
+      template.free();
+    }
+  });
+
+  it("enforces maxTaskCount on 1-5000000000", () => {
+    expect(() =>
+      withJob(chunkTemplate("1-5000000000", 1000000000, "CONTIGUOUS"), { maxTaskCount: 1000000n }, () => {})
+    ).toThrow(
+      new Error(
+        "Model validation error: 1 validation error for Template\n" +
+          "Template: Total task count (5000000000) exceeds caller limit of 1000000."
+      )
+    );
+  });
+
+  it("enforces maxTaskCount on 1-4294967296", () => {
+    expect(() =>
+      withJob(chunkTemplate("1-4294967296", 1, "CONTIGUOUS"), { maxTaskCount: 1000000n }, () => {})
+    ).toThrow(
+      new Error(
+        "Model validation error: 1 validation error for Template\n" +
+          "Template: Total task count (4294967296) exceeds caller limit of 1000000."
+      )
+    );
+  });
+
+  it("accepts a maxTaskCount equal to the exact task count", () => {
+    withJob(chunkTemplate("1-5000000000", 1000000000, "CONTIGUOUS"), { maxTaskCount: 5000000000n }, (job) => {
+      expect(job.name).toBe("T");
+    });
+  });
+
+  // Evaluates `expr` and returns the error message it throws.
+  const evalError = (expr) => {
+    const st = new mod.SymbolTable();
+    try {
+      mod.evaluateExpression(expr, st);
+      return null;
+    } catch (e) {
+      return e.message;
+    } finally {
+      st.free();
+    }
+  };
+
+  it("charges the operation budget for a list plus a range of 2^32 values", () => {
+    // The list's length plus the range's saturated 2^32 - 1 wraps a 32-bit
+    // usize to 0 without saturating addition.
+    expect(evalError("[1] + range_expr('1-4294967296')")).toBe(
+      "Expression operation count (at least 4294967295) exceeded limit (10000000)\n" +
+        "  [1] + range_expr('1-4294967296')\n" +
+        "  ~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+    );
+    expect(evalError("range_expr('1-4294967296') + [1]")).toBe(
+      "Expression operation count (at least 4294967295) exceeded limit (10000000)\n" +
+        "  range_expr('1-4294967296') + [1]\n" +
+        "  ~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~"
+    );
+  });
+
+  it("reports a range's exact length in an index error", () => {
+    expect(evalError("range_expr('1-5000000000')[5000000000]")).toBe(
+      "Index 5000000000 out of bounds for range_expr of length 5000000000\n" +
+        "  range_expr('1-5000000000')[5000000000]\n" +
+        "  ~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~"
+    );
+  });
+
+  it("charges the operation budget for concatenating two ranges of 2^31 values", () => {
+    // The two lengths sum to 2^32, which wraps a 32-bit usize to 0 and
+    // used to skip the budget (then trap building 2^32 values). The charge
+    // saturates at usize::MAX instead, so the count reads "at least".
+    const st = new mod.SymbolTable();
+    try {
+      expect(() =>
+        mod.evaluateExpression("range_expr('1-2147483648') + range_expr('1-2147483648')", st)
+      ).toThrow(
+        new Error(
+          "Expression operation count (at least 4294967295) exceeded limit (10000000)\n" +
+            "  range_expr('1-2147483648') + range_expr('1-2147483648')\n" +
+            "  ~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+        )
+      );
+    } finally {
+      st.free();
+    }
+  });
+
+  it("rejects a saturated memory projection under the largest limits", () => {
+    // 2^27 values fit the operation limit but not the memory limit: the
+    // projected size saturates at usize::MAX, which is over every limit.
+    // Without that rule this trapped.
+    const st = new mod.SymbolTable();
+    try {
+      expect(() =>
+        mod.evaluateExpression("list(range_expr('1-134217728'))", st, undefined, {
+          operationLimit: 4294967295,
+          memoryLimit: 4294967295,
+        })
+      ).toThrow(
+        new Error(
+          "Expression memory usage (at least 4294967295 bytes) exceeded limit (4294967295 bytes)\n" +
+            "  list(range_expr('1-134217728'))\n" +
+            "  ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+        )
+      );
+    } finally {
+      st.free();
+    }
+  });
+
+  it("rejects a saturated charge under the largest operation limit", () => {
+    // 4294967295 is usize::MAX here, the largest operationLimit a caller
+    // can pass. A saturated counter may stand for more, so it is over
+    // every limit; a 64-bit build rejects the same input and limit with
+    // the exact count. Without that rule this trapped.
+    const st = new mod.SymbolTable();
+    try {
+      for (const [expr, caret] of [
+        [
+          "range_expr('1-2147483648') + range_expr('1-2147483648')",
+          "  ~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~",
+        ],
+        ["list(range_expr('1-5000000000'))", "  ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"],
+      ]) {
+        expect(() =>
+          mod.evaluateExpression(expr, st, undefined, { operationLimit: 4294967295 })
+        ).toThrow(
+          new Error(
+            "Expression operation count (at least 4294967295) exceeded limit (4294967295)\n" +
+              `  ${expr}\n` +
+              caret
+          )
+        );
+      }
+    } finally {
+      st.free();
+    }
   });
 });
