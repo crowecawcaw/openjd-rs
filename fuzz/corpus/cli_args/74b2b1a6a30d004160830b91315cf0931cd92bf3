@@ -1,8 +1,0 @@
-{
-        "version": "pathmapping-1.0",
-        "g_rules": [
-            {
-         "stination_path": "/mnt/shared/user"
-            }
-        ]
-    }

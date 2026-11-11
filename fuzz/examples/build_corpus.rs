@@ -16,8 +16,8 @@
 //!
 //! Each candidate is routed to the targets whose parser accepts it.
 //! Generated (`*_gen`) and binary targets get deterministic pseudo-random
-//! byte seeds. `scripts/fuzz.sh corpus` runs this and then `cargo fuzz cmin`
-//! to minimize before committing.
+//! byte seeds. `scripts/fuzz.sh corpus` runs this, then `cargo fuzz cmin`
+//! and `scripts/select_fuzz_corpus.py` to minimize before committing.
 
 use openjd_expr::{ExprType, FormatString, ParsedExpression, RangeExpr};
 use openjd_fuzz::targets::TARGETS;

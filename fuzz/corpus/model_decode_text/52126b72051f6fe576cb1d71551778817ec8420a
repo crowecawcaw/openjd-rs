@@ -1,7 +1,0 @@
-specificationVersion: "jobtemplata-2023-09"
-name:s:
-  - name: OnlyStep
-    script:
-      actions:
-        onR       args: ["-c", "print('Ta-c"
-        - 

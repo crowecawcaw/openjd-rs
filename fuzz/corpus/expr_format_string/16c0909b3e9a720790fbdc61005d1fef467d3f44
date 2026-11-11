@@ -1,1 +1,0 @@
-specificationVersion: jobtemplate-2023-09rint(r\"{{ re_sub('hello', '(\ '',rh)\1') }}\")"

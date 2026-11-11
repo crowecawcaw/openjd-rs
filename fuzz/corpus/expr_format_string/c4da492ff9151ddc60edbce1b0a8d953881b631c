@@ -1,4 +1,0 @@
-specificationVersion: jobttep1
-  script:
-        - -c
- $      - print(r'{{ "hello".replace("", "x") }}')

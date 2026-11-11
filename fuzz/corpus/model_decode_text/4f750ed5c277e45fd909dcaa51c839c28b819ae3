@@ -1,4 +1,0 @@
-specificationVersion: jobtemplate-2023-09
-name: "Job\x7FName"
-steps:    - "-c"
-        - "print()"

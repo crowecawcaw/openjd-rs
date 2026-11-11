@@ -1,1 +1,0 @@
-path('==/b&file_####.exr').with_number(42)

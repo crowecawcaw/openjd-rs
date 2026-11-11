@@ -1,1 +1,0 @@
-path('s3://tuekbc/key/file.txt').relative_to(path('~3://bucket/key'))

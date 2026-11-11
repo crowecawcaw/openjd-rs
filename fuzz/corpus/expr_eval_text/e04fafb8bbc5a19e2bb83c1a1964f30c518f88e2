@@ -1,1 +1,0 @@
-[x for x,b,c'.t.slit(',') if x != S]

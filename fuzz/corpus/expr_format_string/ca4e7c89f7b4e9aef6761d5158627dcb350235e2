@@ -1,5 +1,0 @@
-specificatio2nVer:
-        command: python
-        args:
-        - -c
-        - "print(r\"{{ re_search('hello', '') }}\")"

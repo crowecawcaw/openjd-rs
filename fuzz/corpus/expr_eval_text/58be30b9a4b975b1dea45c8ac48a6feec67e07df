@@ -1,1 +1,0 @@
-(Param.X if Pa.X > 0 else fai+("bad")) + 10

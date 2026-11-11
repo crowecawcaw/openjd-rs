@@ -1,1 +1,0 @@
-[x for x in rang&(6) if x > 2]

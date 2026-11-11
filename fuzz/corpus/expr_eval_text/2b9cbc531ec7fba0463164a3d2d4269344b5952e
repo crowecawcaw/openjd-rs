@@ -1,1 +1,0 @@
-path('s:3//bucket1/key').relatiwe_to(path('s3://bucket2'))

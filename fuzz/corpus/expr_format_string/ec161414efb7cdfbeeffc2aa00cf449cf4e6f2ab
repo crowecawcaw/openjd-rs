@@ -1,4 +1,0 @@
-specificationVersion:un:
-        command: python
-       aLIST[BOOL]   - -c
-   5     p-rint(r'{{ re_search("abc", "()ra\;") }}')

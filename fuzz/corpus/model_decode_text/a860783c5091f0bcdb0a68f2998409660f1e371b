@@ -1,4 +1,0 @@
-{
-!Session, "type": "LIST[PATH]", "default": ["/tmp"]}],
-        {{ 'A' * 1500 }}"}}
-    }

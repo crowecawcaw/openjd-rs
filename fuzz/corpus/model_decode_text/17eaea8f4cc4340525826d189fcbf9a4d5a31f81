@@ -1,4 +1,0 @@
-specificationVersio onRun:
-    0   command: python
- parameterDefinitions          mode: NOTIFY_THEN_TERMINATE
-          notifyPeriodInSeconds: 601

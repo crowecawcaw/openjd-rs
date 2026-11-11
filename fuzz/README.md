@@ -20,6 +20,7 @@ FUZZ_SECONDS=1800 scripts/fuzz.sh run expr_eval_gen
 scripts/fuzz.sh replay                       # corpus + regressions under ASan
 scripts/fuzz.sh cmin                         # fold fuzz/work/ back into fuzz/corpus/
 scripts/fuzz.sh corpus                       # rebuild the corpus from repo fixtures + committed inputs
+# (cmin and corpus also need Python 3.11+ and `rustup component add llvm-tools`)
 scripts/fuzz.sh sync-lock                    # fuzz/Cargo.lock := workspace lock's versions + committed fuzz-only pins
 scripts/fuzz.sh dict                         # regenerate dicts/expr.dict
 
@@ -35,7 +36,7 @@ python3 scripts/check_fuzz_api_coverage.py --generate --report
 | `src/gen/*.rs` | Structure-aware generators: typed values, signature-driven expressions, templates, manifests. |
 | `fuzz_targets/*.rs` | One-line libFuzzer shims, one per registry entry. |
 | `tests/replay.rs` | Stable replay of `corpus/` and `regressions/`; registry/shim/corpus/dictionary consistency checks. |
-| `corpus/<target>/` | Committed, minimized seed corpus (mined from the repo's tests and the specification conformance suite, then grown by fuzzing). Minimized to edge coverage only, so it stays small; CI caches a richer grown corpus. |
+| `corpus/<target>/` | Committed, minimized seed corpus (mined from the repo's tests and the specification conformance suite, then grown by fuzzing). Reduced to a set cover of the openjd functions each target executes (`scripts/select_fuzz_corpus.py`, after `cargo fuzz cmin`), so it stays small; CI caches a richer grown corpus. |
 | `regressions/<target>/` | Inputs that found bugs. `known-*` files reproduce open known issues. |
 | `dicts/expr.dict` | Dictionary for text targets; function names come from the live function library. |
 | `api_coverage.toml` | Public functions deliberately not fuzzed, each with a reason. |

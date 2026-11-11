@@ -1,1 +1,0 @@
-path("/mnt/rEXPRenders/scene.exr").as_posix()

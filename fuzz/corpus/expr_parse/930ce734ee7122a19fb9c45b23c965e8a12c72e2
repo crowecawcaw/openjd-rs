@@ -1,1 +1,0 @@
-len([i for i in range(~00)])

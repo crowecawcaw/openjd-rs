@@ -1,8 +1,0 @@
-specificatioame: TestJob
-description: &"DesStep1
-  scriWrappedAction.Commandpt:
-    actions:
-      onRun:
-        command: echo
-        args:
-        - "test"

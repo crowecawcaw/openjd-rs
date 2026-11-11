@@ -1,1 +1,0 @@
-re_findall('shOt010_shot020', r'shot(\d*)')

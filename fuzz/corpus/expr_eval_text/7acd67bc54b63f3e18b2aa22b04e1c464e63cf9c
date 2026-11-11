@@ -1,1 +1,0 @@
-"yes" if (*Param.Flag or fail("r)) else "no"

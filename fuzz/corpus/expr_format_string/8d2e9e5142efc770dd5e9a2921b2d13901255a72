@@ -1,3 +1,0 @@
-template:
-  specificationVersio  li:{{ re_findall("shot010_shWrappedAction.Commandot020", r"shot(\d+)") }}')
-   pecificati  - "NO_MATCH:[]"

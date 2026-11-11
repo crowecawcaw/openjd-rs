@@ -1,6 +1,0 @@
-{
-        "specificationVersion": "jobtemplate-2023-09",
-        "extensions": ["FEATURE_BUN"],
-        "name": "Test",
-        "steps": [{"name": "S", "powershell": {"script(": "echo"}}]
-    }

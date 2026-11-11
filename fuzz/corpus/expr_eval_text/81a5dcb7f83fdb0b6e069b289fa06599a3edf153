@@ -1,1 +1,0 @@
-path('/a/b/a/b/file.tfile.txt').with_suffix('.png')

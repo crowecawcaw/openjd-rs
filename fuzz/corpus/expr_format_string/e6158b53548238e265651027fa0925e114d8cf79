@@ -1,3 +1,0 @@
-# script:
-    actions:
-       - "print(r'{{ 2 ** 64 }}')"

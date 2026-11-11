@@ -13,9 +13,11 @@
 #   scripts/fuzz.sh corpus              rebuild fuzz/corpus from the repo's
 #                                       fixtures (plus OPENJD_SPECS_DIR if set)
 #                                       and the committed inputs, minimized
-#                                       with `cargo fuzz cmin`
+#                                       with `cargo fuzz cmin`, then reduced
+#                                       by scripts/select_fuzz_corpus.py
 #   scripts/fuzz.sh cmin [TARGET...]    re-minimize fuzz/corpus in place,
 #                                       folding in FUZZ_WORK_DIR if present
+#                                       (same two steps as `corpus`)
 #   scripts/fuzz.sh cmin-work [TARGET...]  minimize FUZZ_WORK_DIR in place
 #   scripts/fuzz.sh dict                regenerate fuzz/dicts/expr.dict
 #   scripts/fuzz.sh sync-lock           reset fuzz/Cargo.lock to the workspace
@@ -99,9 +101,11 @@ artifact_count() {
 }
 
 LIBFUZZER_ARGS=(-timeout=20 -rss_limit_mb=3072 -malloc_limit_mb=2048 -max_len=65536 -print_final_stats=1)
-# The committed corpus is a set cover of edges only (no hit-count or
-# value-profile features): it stays small enough to review, and still executes
-# everything the API gate checks. The CI-cached corpus keeps all features.
+# The committed corpus is built in two steps: an edge-only set cover (no
+# hit-count or value-profile features), then scripts/select_fuzz_corpus.py,
+# which keeps a set cover of the openjd functions each target executes. That
+# is about a tenth of the edge cover's files, and still executes everything
+# the API gate checks. The CI-cached corpus keeps all features.
 COMMITTED_CMIN_ARGS=(-use_counters=0 -use_value_profile=0 -set_cover_merge=1)
 
 cmd="${1:-run}"
@@ -191,6 +195,9 @@ case "$cmd" in
             mkdir -p "$FUZZ_DIR/corpus/$t"
             cp "$raw/$t"/* "$FUZZ_DIR/corpus/$t/"
         done <<< "$targets"
+        # Unquoted on purpose: one argument per target name.
+        # shellcheck disable=SC2086
+        python3 "$REPO_ROOT/scripts/select_fuzz_corpus.py" $targets
         ;;
 
     cmin-work)
@@ -219,6 +226,8 @@ case "$cmd" in
             cp "$merged"/* "$FUZZ_DIR/corpus/$t/"
             rm -rf "$merged"
         done <<< "$targets"
+        # shellcheck disable=SC2086
+        python3 "$REPO_ROOT/scripts/select_fuzz_corpus.py" $targets
         ;;
 
     sync-lock)

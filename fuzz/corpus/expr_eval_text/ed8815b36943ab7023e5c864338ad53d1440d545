@@ -1,1 +1,0 @@
-re_search('(?<!baz)bar', r'\(\a!bz?<\)')

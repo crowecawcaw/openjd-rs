@@ -1,4 +1,0 @@
-speci]ficationVespecificatioame: Step1
-          args:
-        - -c
-        - print(r'{{ min([]) }}';

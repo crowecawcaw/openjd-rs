@@ -1,6 +1,0 @@
-specificationVersion: environment-2023-09
-par#meterDefinitions:
-- name: EnvPath
-  type: nv
-  variables:
-    PATH_VAR: '{{Param.EnvPath}}'
