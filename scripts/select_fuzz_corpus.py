@@ -14,7 +14,13 @@
 #
 # Each input is replayed alone through the `replay` test built with
 # `-Cinstrument-coverage`; a function counts if its llvm entry counter is
-# nonzero. Every monomorphization of every function in an openjd crate is a
+# nonzero. Some inputs reach a function only on some runs (hash-seeded
+# collections vary between processes), so each input is replayed RUNS times
+# and only the functions seen on every run count: the selection then relies on
+# inputs that reach each function reliably. Which inputs it picks can still
+# differ slightly between runs (model_job_gen), but every result covers the
+# same functions.
+# Every monomorphization of every function in an openjd crate is a
 # separate element to cover, which is stricter than the gate (any
 # instantiation of a public function counts there), so a selection that
 # covers everything here keeps the gate passing. Regressions are not
@@ -40,6 +46,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 FUZZ = REPO / "fuzz"
 TARGET_DIR = FUZZ / "target" / "select-corpus"
+RUNS = 2
 
 
 def build_replay() -> Path:
@@ -99,7 +106,14 @@ def executed(profdata: Path, profraw: Path) -> frozenset[str]:
 
 def coverage(replay: Path, profdata: Path, work: Path, target: str,
              inp: Path | None) -> frozenset[str]:
-    """Functions executed by replaying one input (None: the harness alone)."""
+    """Functions executed on every one of RUNS replays of one input (None: the harness alone)."""
+    return frozenset.intersection(*(replay_once(replay, profdata, work, target, inp)
+                                    for _ in range(RUNS)))
+
+
+def replay_once(replay: Path, profdata: Path, work: Path, target: str,
+                inp: Path | None) -> frozenset[str]:
+    """Functions executed by replaying one input once."""
     d = Path(tempfile.mkdtemp(dir=work))
     try:
         tree = d / "tree" / target
