@@ -929,15 +929,20 @@ pub fn check_expression(
                     }
                     // The static pass folds path operations in the host's
                     // format; in the other format a folded condition can go
-                    // the other way. Only when the host-format run agrees
-                    // with the static type: its value fits, or it fails with
-                    // an error any well-typed run may hit (the branch the
-                    // host fold kept can hit an operation limit the other
-                    // branch does not).
+                    // the other way. Only when the fold is the cause: the
+                    // static pass run in this run's format gives a type the
+                    // value fits. (Not "the host-format run fits": the
+                    // branch the host fold kept can fail at run time, with
+                    // an operation limit, say, and give no value to check.)
                     if fmt != PathFormat::host() && involves_paths(src, env) {
-                        let host = PathFormat::host();
-                        let (hv, _) = eval_concrete(parsed, &runtime, &env.concrete_in(host), host);
-                        if hv.map_or_else(|e| value_dependent(e.kind()), |hv| fits(&hv, &st)) {
+                        let tabs = [&env.unresolved];
+                        let in_fmt = parsed
+                            .with_library(&validation)
+                            .with_memory_limit(MEMORY_LIMIT)
+                            .with_operation_limit(OP_LIMIT)
+                            .with_path_format(fmt)
+                            .evaluate(&tabs);
+                        if in_fmt.is_ok_and(|fv| fits(cv, &static_type(&fv))) {
                             explained.push("expr-static-fold-host-path-format");
                         }
                     }
