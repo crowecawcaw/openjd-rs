@@ -216,7 +216,11 @@ case "$cmd" in
 
     replay)
         targets="$(targets_or_all "$@")"
-        cargo_fuzz build --debug-assertions
+        # `cargo fuzz run` builds the target it runs, so named targets build
+        # only themselves (CI's Windows/macOS build check replays one).
+        if [[ $# -eq 0 ]]; then
+            cargo_fuzz build --debug-assertions
+        fi
         while IFS= read -r t; do
             [[ -z "$t" ]] && continue
             dirs=()

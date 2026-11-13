@@ -12,6 +12,9 @@ name: Fuzz
 #                 accumulates instead of restarting from the seeds every time.
 #                 PRs fuzz each target for FUZZ_SECONDS_PR; the nightly run
 #                 for FUZZ_SECONDS_NIGHTLY.
+# - fuzz-build:   on macOS and Windows, the libFuzzer/ASan build and a replay
+#                 of one target through scripts/fuzz.sh (no fuzzing), so the
+#                 platform-specific build steps stay working.
 # - api-coverage: every public function of openjd-expr / -model / -sessions /
 #                 -snapshots must be executed by the committed corpus (llvm
 #                 source coverage of the replay), or be excluded with a reason
@@ -105,6 +108,53 @@ jobs:
         run: |
           rustup toolchain install nightly --profile minimal --component rustfmt
           cargo +nightly fmt --manifest-path fuzz/Cargo.toml --all -- --check
+
+  # The libFuzzer/ASan build is platform-specific (on Windows, scripts/fuzz.sh
+  # passes --no-include-main-msvc and puts MSVC's ASan runtime on PATH), but
+  # only Linux fuzzes. Build and replay one target through scripts/fuzz.sh on
+  # the other platforms, so a broken build there fails here without adding
+  # fuzzing time. Runs alongside the other jobs.
+  fuzz-build:
+    name: Fuzz build check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install rust nightly
+        shell: bash
+        run: rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
+      - name: Restore cargo-fuzz
+        id: cargo-fuzz-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin/cargo-fuzz
+            ~/.cargo/bin/cargo-fuzz.exe
+          key: cargo-fuzz-${{ runner.os }}-0.13.2
+      - name: Install cargo-fuzz
+        if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-fuzz --locked --version 0.13.2
+      - name: Restore build cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            fuzz/target
+          key: fuzz-build-${{ runner.os }}-${{ env.FUZZ_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', 'fuzz/Cargo.lock') }}
+          restore-keys: fuzz-build-${{ runner.os }}-${{ env.FUZZ_TOOLCHAIN }}-
+      - name: Sync fuzz/Cargo.lock to the workspace lock
+        shell: bash
+        run: scripts/fuzz.sh sync-lock
+      # snapshots_decode_text links openjd-snapshots, whose crc-fast
+      # dependency is what --no-include-main-msvc exists for.
+      - name: Build and replay one target under ASan
+        shell: bash
+        run: scripts/fuzz.sh replay snapshots_decode_text
 
   fuzz:
     name: Fuzz
