@@ -849,15 +849,18 @@ pub fn check_expression(
     let runtime = runtime_library(&env.rules);
     let validation = validation_library();
 
-    // Static pass, as template validation runs it.
-    let static_result = {
+    // Static pass, as template validation runs it (in the host's path
+    // format; the other format only for expr-static-fold-host-path-format).
+    let static_pass = |fmt: PathFormat| {
         let tabs = [&env.unresolved];
         parsed
             .with_library(&validation)
             .with_memory_limit(MEMORY_LIMIT)
             .with_operation_limit(OP_LIMIT)
+            .with_path_format(fmt)
             .evaluate(&tabs)
     };
+    let static_result = static_pass(PathFormat::host());
 
     for fmt in [PathFormat::Posix, PathFormat::Windows] {
         let table = env.concrete_in(fmt);
@@ -934,17 +937,11 @@ pub fn check_expression(
                     // value fits. (Not "the host-format run fits": the
                     // branch the host fold kept can fail at run time, with
                     // an operation limit, say, and give no value to check.)
-                    if fmt != PathFormat::host() && involves_paths(src, env) {
-                        let tabs = [&env.unresolved];
-                        let in_fmt = parsed
-                            .with_library(&validation)
-                            .with_memory_limit(MEMORY_LIMIT)
-                            .with_operation_limit(OP_LIMIT)
-                            .with_path_format(fmt)
-                            .evaluate(&tabs);
-                        if in_fmt.is_ok_and(|fv| fits(cv, &static_type(&fv))) {
-                            explained.push("expr-static-fold-host-path-format");
-                        }
+                    if fmt != PathFormat::host()
+                        && involves_paths(src, env)
+                        && static_pass(fmt).is_ok_and(|fv| fits(cv, &static_type(&fv)))
+                    {
+                        explained.push("expr-static-fold-host-path-format");
                     }
                 }
                 if !explained.is_empty() {

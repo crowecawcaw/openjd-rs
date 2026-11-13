@@ -357,7 +357,11 @@ fn host_path_fold_does_not_claim_other_mismatches() {
     IN_REPLAY.with(|r| r.set(true));
     let outcome = catch_unwind(AssertUnwindSafe(|| target(&data)));
     IN_REPLAY.with(|r| r.set(false));
-    assert!(outcome.is_ok(), "no oracle violation expected");
+    assert!(
+        outcome.is_ok(),
+        "unexpected oracle violation: {}",
+        LAST_PANIC.with(|p| p.borrow().clone())
+    );
     let hit = take_recorded();
     assert_eq!(
         hit,
