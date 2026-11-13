@@ -275,6 +275,7 @@ fn main() {
                     | "expr_symbol_table"
                     | "sessions_framer"
                     | "sessions_embedded_files"
+                    | "sessions_state"
                     | "sessions_directives"
             );
         if generated {

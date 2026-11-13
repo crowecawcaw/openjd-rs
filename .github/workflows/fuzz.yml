@@ -53,7 +53,7 @@ env:
   # Pinned so a broken nightly cannot randomly fail the job; bump deliberately
   # (and keep scripts/fuzz.sh and scripts/check_fuzz_api_coverage.py in step).
   FUZZ_TOOLCHAIN: nightly-2026-10-07
-  # Per target, run one after another (21 targets: ~5 min on a PR, ~20 min
+  # Per target, run one after another (22 targets: ~5 min on a PR, ~20 min
   # nightly). The committed corpus is a good start and the grown corpus is
   # cached across runs, so short runs keep accumulating coverage.
   FUZZ_SECONDS_PR: 15

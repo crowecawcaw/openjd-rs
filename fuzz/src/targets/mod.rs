@@ -45,6 +45,7 @@ pub const TARGETS: &[(&str, Target)] = &[
     ("sessions_directives", sessions::directives),
     ("sessions_framer", sessions::framer),
     ("sessions_embedded_files", sessions::embedded_files),
+    ("sessions_state", sessions::state),
     ("snapshots_decode_text", snapshots::decode_text),
     ("snapshots_ops_gen", snapshots::ops_gen),
     ("cli_args", cli::args),

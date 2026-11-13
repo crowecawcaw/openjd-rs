@@ -17,6 +17,11 @@
 //!   how the stream is chunked, and every framed line fits the response cap.
 //! - **Embedded files stay inside the session directory** (#359, 7d4c950),
 //!   and the session accepts every filename template validation accepted.
+//! - **Ending-only mode** (#524): over any sequence of states, the session
+//!   reports `ReadyEnding` exactly when a reference model says it is
+//!   ending-only, and `clear_ending_only` succeeds only from `ReadyEnding`,
+//!   leaving `Ready`, and otherwise fails with `InvalidState` and changes
+//!   nothing.
 
 use crate::gen::{self, flip, one_in, pick, upto};
 use crate::helper_framer::{self, LineFramer, MAX_LINE_BYTES, MAX_RESPONSE_LINE_LENGTH};
@@ -499,4 +504,77 @@ pub fn embedded_files(data: &[u8]) {
         "CRLF conversion left a bare LF in {text:?}"
     );
     let _ = convert_line_endings(&text, EndOfLine::Auto);
+}
+
+/// Session state machine: `Session::clear_ending_only` (#524) against a
+/// reference model of the stored state and the ending-only flag, as
+/// `Session::set_state_for_test` and `clear_ending_only` document them.
+///
+/// The session-wide cancel token, which makes `clear_ending_only` refuse
+/// with `SessionCanceled`, is unit-tested in openjd-sessions: setting it
+/// needs `Session::with_config`, which creates directories.
+pub fn state(data: &[u8]) {
+    use openjd_sessions::{Session, SessionError, SessionState};
+    const STATES: [SessionState; 5] = [
+        SessionState::Ready,
+        SessionState::ReadyEnding,
+        SessionState::Running,
+        SessionState::Canceling,
+        SessionState::Ended,
+    ];
+    // Dropping a session that was never cleaned up removes its working
+    // directory, so give it one that is never created.
+    let dir = std::env::temp_dir()
+        .join(format!("openjd-fuzz-sessions-state-{}", std::process::id()))
+        .join("never-created");
+    let mut session = Session::new_for_test(dir);
+    // The model: `ReadyEnding` is stored as `Ready` plus the flag.
+    let (mut stored, mut ending) = (SessionState::Ready, false);
+    let reported = |stored: SessionState, ending: bool| {
+        if stored == SessionState::Ready && ending {
+            SessionState::ReadyEnding
+        } else {
+            stored
+        }
+    };
+    let mut u = Unstructured::new(data);
+    for _ in 0..64 {
+        if u.is_empty() {
+            break;
+        }
+        let before = reported(stored, ending);
+        if flip(&mut u) {
+            let next = *pick(&mut u, &STATES);
+            session.set_state_for_test(next);
+            if next == SessionState::ReadyEnding {
+                (stored, ending) = (SessionState::Ready, true);
+            } else {
+                stored = next;
+            }
+        } else {
+            match session.clear_ending_only() {
+                Ok(()) => {
+                    oracle!(
+                        before == SessionState::ReadyEnding,
+                        "clear_ending_only succeeded from {before:?}"
+                    );
+                    ending = false;
+                }
+                Err(SessionError::InvalidState { expected, current }) => oracle!(
+                    before != SessionState::ReadyEnding
+                        && expected == [SessionState::ReadyEnding]
+                        && current == before,
+                    "clear_ending_only from {before:?} failed with InvalidState \
+                     {{ expected: {expected:?}, current: {current:?} }}"
+                ),
+                Err(e) => oracle!(false, "clear_ending_only from {before:?} failed: {e:?}"),
+            }
+        }
+        let want = reported(stored, ending);
+        oracle!(
+            session.state() == want,
+            "after a step from {before:?} the session reports {:?}, the model {want:?}",
+            session.state()
+        );
+    }
 }

@@ -202,6 +202,14 @@ bench = false
 required-features = ["libfuzzer"]
 
 [[bin]]
+name = "sessions_state"
+path = "fuzz_targets/sessions_state.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
 name = "sessions_framer"
 path = "fuzz_targets/sessions_framer.rs"
 test = false
