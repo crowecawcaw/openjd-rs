@@ -278,7 +278,7 @@ PRs run these checks (all must pass):
 | **Cross-User (Linux)** | Docker-based cross-user tests: localuser and LDAP variants |
 | **Cross-User (Windows)** | Windows cross-user and permissions tests with a temporary test user |
 | **openjd-for-js** | Clippy (host and wasm32) and Rust tests for the crate, then builds the wasm32 crate with `wasm-bindgen` and runs the vitest suite |
-| **Fuzz** (`fuzz.yml`, not a required check) | Corpus replay on all three platforms; libFuzzer under ASan over every target in one job on Linux (15 s per target on PRs, 1 min nightly, corpus cached across runs), plus an ASan build and replay of one target on macOS and Windows; public-API fuzz-coverage gate |
+| **Fuzz** (`fuzz.yml`, not a required check) | Corpus replay on all three platforms; libFuzzer under ASan over every target in one job on Linux (15 s per target on PRs, 3 min nightly, corpus cached across runs), plus an ASan build and replay of one target on macOS and Windows; public-API fuzz-coverage gate |
 
 ### Fuzzing
 
