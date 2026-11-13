@@ -18,10 +18,10 @@
 //! - **Embedded files stay inside the session directory** (#359, 7d4c950),
 //!   and the session accepts every filename template validation accepted.
 //! - **Ending-only mode** (#524): over any sequence of states, the session
-//!   reports `ReadyEnding` exactly when a reference model says it is
-//!   ending-only, and `clear_ending_only` succeeds only from `ReadyEnding`,
-//!   leaving `Ready`, and otherwise fails with `InvalidState` and changes
-//!   nothing.
+//!   reports `ReadyEnding` exactly when a reference model's stored state is
+//!   `Ready` and it is ending-only, and `clear_ending_only` succeeds only
+//!   from `ReadyEnding`, leaving `Ready`, and otherwise fails with
+//!   `InvalidState` and changes nothing.
 
 use crate::gen::{self, flip, one_in, pick, upto};
 use crate::helper_framer::{self, LineFramer, MAX_LINE_BYTES, MAX_RESPONSE_LINE_LENGTH};
@@ -511,7 +511,8 @@ pub fn embedded_files(data: &[u8]) {
 /// `Session::set_state_for_test` and `clear_ending_only` document them.
 ///
 /// The session-wide cancel token, which makes `clear_ending_only` refuse
-/// with `SessionCanceled`, is unit-tested in openjd-sessions: setting it
+/// with `SessionCanceled`, is covered by openjd-sessions' integration tests
+/// (`tests/integration/test_brittle_session.rs`): setting it
 /// needs `Session::with_config`, which creates directories.
 pub fn state(data: &[u8]) {
     use openjd_sessions::{Session, SessionError, SessionState};
