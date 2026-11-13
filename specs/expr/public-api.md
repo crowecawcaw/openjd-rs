@@ -225,8 +225,8 @@ pub const DEFAULT_OPERATION_LIMIT: usize = 10_000_000;
 pub const MAX_EXPRESSION_DEPTH: usize = 64;
 
 /// Maximum source length (in bytes) for a single `ParsedExpression::new`
-/// call. Sized to leave generous headroom on a debug-profile 32 MB
-/// parser-thread stack.
+/// call. Bounds the parser's stack use (with its `stacker` feature and the
+/// 32 MB parser thread) and its work (see parser.md, Depth Limit).
 pub const MAX_PARSE_INPUT_LEN: usize = 64 * 1024;
 ```
 
@@ -751,7 +751,11 @@ impl ExprValue {
     // ── Coercion ──
 
     /// Coerce a string into the target type. Used by the job-parameter
-    /// pipeline to turn CLI string inputs into typed parameters.
+    /// pipeline to turn CLI string inputs into typed parameters. For an
+    /// `int` or `float` target, white space around the number (Unicode
+    /// `White_Space`, what `str::trim` removes) is ignored, and a `float`
+    /// keeps its text without it; errors quote `s` as given. See
+    /// values.md § from_str_coerce.
     pub fn from_str_coerce(
         s: &str, target: &ExprType, path_format: PathFormat,
     ) -> Result<Self, String>;
@@ -1617,6 +1621,12 @@ impl ExpressionError {
 impl std::fmt::Display for ExpressionError;   // multi-line caret-annotated form
 impl std::error::Error for ExpressionError;   // source() returns &kind
 ```
+
+`with_node` takes a node from the `ruff_python_ast` crate that Astral
+publishes, pinned at `=0.0.21` (see [parser.md](parser.md)). A caller that
+passes a node must depend on that same crate and version. Before #489 the type
+came from `rustpython-ruff_python_ast` 0.16.10, which is a different crate, so
+nodes from it no longer type-check.
 
 ## Function Implementations (`functions::*`)
 

@@ -14,38 +14,168 @@ pub enum SessionState {
     Ready,        // Can start any action
     Running,      // An action is in progress
     Canceling,    // Cancel requested, waiting for subprocess to exit
-    ReadyEnding,  // Failed/canceled — only exit_environment allowed
+    ReadyEnding,  // Ending-only — only exit_environment, cleanup and clear_ending_only allowed
     Ended,        // cleanup() called, session is done
 }
 ```
+
+`Session` never stores `ReadyEnding`. Its private `state` field is a `StoredState`, which
+has only `Ready`, `Running`, `Canceling` and `Ended`, and ending-only mode lives only in
+the private `ending_only` flag. `Session::state()` derives `ReadyEnding`: it reports a
+stored `Ready` as `ReadyEnding` while `ending_only` is set, and reports every other state
+as stored. The flag is the one source of truth for ending-only mode, so the state and
+the flag can't disagree. The flag has to exist anyway, because it is what remembers
+ending-only mode through `Running` and `Canceling`. Every state check in `Session`, and
+the `current` state in every `SessionError::InvalidState`, uses `state()`.
 
 ### Transitions
 
 ```
 Ready ──────────► Running         (enter_environment / exit_environment / run_task / run_subprocess)
 Running ────────► Ready           (action succeeded, session not in ending-only mode)
-Running ────────► ReadyEnding     (action failed/canceled, OR session is in ending-only mode)
+Running ────────► ReadyEnding     (action failed/canceled/timed out, OR session is in ending-only mode)
 Running ────────► Canceling       (cancel_action called)
-Canceling ──────► Ready           (canceled action completes, session not ending)
-Canceling ──────► ReadyEnding     (canceled action completes, session is ending)
+Canceling ──────► Ready           (action finished Success before the cancel reached it, session not in ending-only mode)
+Canceling ──────► ReadyEnding     (action ended Canceled/Failed/Timeout, OR session is in ending-only mode)
+Ready ──────────► ReadyEnding     (enter_environment / exit_environment failed building the symbol table or resolving variables, before Running)
 ReadyEnding ───► Running          (exit_environment started)
+ReadyEnding ───► Ready            (clear_ending_only)
 Ready ──────────► Ended           (cleanup)
 ReadyEnding ───► Ended            (cleanup)
 ```
 
+These are the states `state()` reports. Going to `ReadyEnding` stores `Ready` with
+`ending_only` set, and `ReadyEnding ───► Ready` clears the flag and leaves the stored
+state alone. The per-operation steps in the rest of this document use the same
+convention: "state" means what `state()` reports, so "state → `ReadyEnding`" means the
+stored state becomes `Ready` with `ending_only` set.
+
 ### Brittle Sessions
 
 After any action failure or cancelation, the session transitions to `ReadyEnding`. In
-this state, only `exit_environment()` and `cleanup()` are allowed. This prevents running
-new tasks or entering new environments after a failure, matching the Python library's
-behavior.
+this state, only `exit_environment()`, `cleanup()` and `clear_ending_only()` are allowed.
+This prevents running new tasks or entering new environments after a failure unless the
+caller explicitly asks for it. The Python library follows the same rule, except in the
+case described in
+[architecture.md § Python-vs-Rust Design Comparison](architecture.md#python-vs-rust-design-comparison).
 
 The `ending_only` flag is set when:
-- An action completes with `ActionState::Failed`, `Canceled`, or `Timeout`
+- An action completes with `ActionState::Failed`, `Canceled`, or `Timeout`. This covers
+  every way an action can end that way: a non-zero exit or `openjd_fail`, a cancel
+  (including one with `mark_action_failed`, which reports `Failed`), a timeout, a runner
+  error such as a command that can't be started, a failure while setting up the action
+  before its subprocess starts, and the same outcomes for `run_subprocess` through the
+  cross-user helper
 - `exit_environment()` is called without `keep_session_running` (the default)
 
+`keep_session_running = true` means only "don't make the session ending-only on this
+exit". An `onExit` that ends `Failed`, `Canceled` or `Timeout` still makes it ending-only,
+like any other action, and
+`keep_session_running` never clears `ending_only`. When an action ends, the stored state
+goes back to `Ready`, and `state()` reports `ReadyEnding` if `ending_only` is set and
+`Ready` otherwise, so `keep_session_running` can't bring an ending-only session back to
+`Ready`. All of these paths settle the state through one private helper,
+`settle_after_action`, which sets the flag for a `Failed`, `Canceled` or `Timeout` action
+and then stores `Ready`. Because `ReadyEnding` is derived from the flag rather than
+stored beside it, `state() == Ready` means the session isn't ending-only, and the `Ready`
+checks in `run_task`, `enter_environment` and `run_subprocess` enforce the contract
+without checking `ending_only` themselves.
+
 This design reflects the worker agent's pattern: after a task fails, the agent exits all
-environments in reverse order and cleans up. There's no recovery path.
+environments in reverse order and cleans up.
+
+The only way back to `Ready` is an explicit call to the public method
+`clear_ending_only()`:
+
+- It's allowed only in `ReadyEnding`. In any other state (`Ready`, `Running`, `Canceling`,
+  `Ended`) it returns `SessionError::InvalidState` with `expected: [ReadyEnding]` and
+  changes nothing.
+- It clears `ending_only` whatever set it (a failed, canceled or timed-out action, or a
+  default `exit_environment`). That is all it changes: the stored state is already
+  `Ready`, so `state()` then reports `Ready`.
+- It runs no action and changes nothing else: the entered environments, the last action's
+  status and the session's environment variables stay as they were. A later failure
+  makes the session ending-only again.
+- It refuses, and changes nothing, when the session-wide
+  `SessionConfig::cancel_token` exists and has been canceled: it returns
+  `SessionError::SessionCanceled` and leaves the session `ReadyEnding`. That cancellation
+  is permanent — a tokio token can't be reset — so every later action would end `Canceled`
+  and make the session ending-only again; `clear_ending_only()` won't return the session to
+  `Ready` under a cancellation it can't undo, so what the method does matches what it says.
+  Only `exit_environment()` and `cleanup()` remain. A per-action cancel (`cancel_action()`
+  or a `SessionCancelHandle`) does not block it — only the session-wide token does.
+
+It's for callers that deliberately want to keep running work after a failure or an
+ending exit, and they take responsibility for the session's state. A failed or canceled
+action can leave its work half done, and the session neither checks nor undoes it.
+
+### Failures before an action starts
+
+`enter_environment`, `exit_environment` and `run_task` first check that the call can be
+accepted. A call that fails one of these checks is **rejected**: it returns the error and
+changes nothing (state, entered environments, the last action's status), and no callback
+fires. The rejections are:
+
+| Call | Rejections |
+|------|------------|
+| `enter_environment` | `InvalidState` (not `Ready`), `DuplicateEnvironment` (an explicit `identifier` already entered), `MultipleWrapEnvironments` (RFC 0008 single wrap layer) |
+| `exit_environment` | `InvalidState` (not `Ready` or `ReadyEnding`), `UnknownEnvironment`, `LifoViolation` |
+| `run_task` | `InvalidState` (not `Ready`) |
+| `run_subprocess` | `InvalidState` (not `Ready`), and `Runtime` for an empty command or a zero timeout |
+
+These are the checks the Python library also makes before it touches the session, and
+they run before anything that could fail an action, so a rejected call is rejected even
+if its other input would also fail.
+
+Once a call is accepted, any failure before its action's subprocess starts **fails the
+action**, as in the Python library (`Session._fail_action_before_start`). The action
+status becomes `Failed`, with the error's message as its `fail_message` and no exit code;
+the callback reports it; and the session settles through `settle_after_action(Failed)`,
+so it is ending-only (`ReadyEnding`). Two of these run before the action is reported
+`Running`, so they occur even for an environment with no `onEnter`/`onExit`: building the
+symbol table (an undeserializable `resolved_symtab`, a job parameter value that can't be
+coerced to its declared type, a `PATH` or `LIST[PATH]` value over the path mapping limit)
+and resolving an environment's `variables`. The rest run after `Running`: writing the path mapping rules file and resolving or
+writing an RFC 0008 wrap hook's symbols and embedded files (in the `onEnter`/`onExit`
+action branch), and, in `run_task` only, building the symbol table and coercing task
+parameter values (`run_task` reports `Running` before it builds the table). (The Python
+runtime writes the path mapping rules file unconditionally, so it can fail that write for
+an environment with no `onEnter`/`onExit` where Rust does not — a pre-existing
+divergence.) Failures after the subprocess is dispatched,
+such as an embedded file that can't be written or a command that can't be started, were
+already failed actions (see [drive_action](#drive_action)).
+
+The call still returns the error. That is how every failed action in
+`enter_environment` and `exit_environment` already reports itself
+(`EnvironmentScriptFailed` for a failed `onEnter`/`onExit`), and how `run_task` already
+reports a setup failure. The Python methods are non-blocking and report every outcome
+through `action_status`, so they return normally instead (`enter_environment` returns the
+identifier). A Rust caller that reads `action_status()` sees what a Python caller sees. To
+tell a rejection from a failed action, check `state()` or `action_status()`, or the
+variant: only the rejection variants above leave the session unchanged.
+
+A failed `enter_environment` leaves the environment on `environments_entered`, as in
+Python, and the caller must still exit it. When the caller didn't pass an `identifier`,
+the environment is `environments_entered().last()`. A failed `exit_environment` has
+already removed the environment, so it still counts as an exit.
+
+Which callbacks a pre-start failure fires depends on when it happens relative to the
+`Running` notification. `enter_environment` and `exit_environment` report only a `Failed`
+callback for a failure while building the symbol table, and `enter_environment` also for
+resolving an environment's `variables` — these run before the action is reported
+`Running`. Their later setup steps (writing the path mapping rules file, resolving or
+writing an RFC 0008 wrap hook's symbols and embedded files) run after `Running`, so they
+report `Running` and then `Failed`. `run_task` reports `Running` and then `Failed` for
+every pre-start failure, because it reports `Running` before it builds the symbol table.
+The terminal outcome is the same in every case, and the Python runtime reports only the
+`Failed` callback for all of them. The `fail_message` is the error's own text — Rust's
+wording, not identical to the Python runtime's for the same input.
+
+When the resolved action runs and ends non-`Success` (a failed, canceled or timed-out
+`onEnter`/`onExit`), `enter_environment` and `exit_environment` return
+`SessionError::EnvironmentScriptFailed`, and the action status is the script's own
+terminal state rather than `Failed` with an error message. The session is ending-only
+either way.
 
 ## SessionConfig
 
@@ -131,7 +261,12 @@ must be `Send + Sync` because it's invoked from the async task processing `Actio
 values.
 
 The callback fires on:
-- Action start (state = Running)
+- Action start (state = Running) — but not for an `enter_environment`/`exit_environment`
+  action that has no `onEnter`/`onExit` (it records `Success` without a `Running`
+  callback), nor for a failure before that action is reported `Running` (building the
+  symbol table, or resolving an environment's `variables`), which reports only the
+  `Failed` state. `run_task` always reports `Running` first (see
+  [Failures before an action starts](#failures-before-an-action-starts))
 - Every `openjd_*` directive (progress, status, fail)
 - Action completion (state = Success/Failed/Canceled/Timeout)
 
@@ -148,6 +283,13 @@ Canceling the parent cascades to all current and future actions in the session.
 This enables the worker agent to cancel an entire session from outside the session's
 async context (e.g., when the Deadline service sends a cancel request). Without this,
 the agent would need to track and cancel each action individually.
+
+A tokio `CancellationToken` can't be reset once canceled, so this cancellation is
+permanent: every action after it ends `Canceled`. Because of that, once the session-wide
+token is canceled, `clear_ending_only()` refuses with `SessionError::SessionCanceled`
+rather than return the session to `Ready` (see [Brittle Sessions](#brittle-sessions)).
+A per-action cancel (`cancel_action()` or a `SessionCancelHandle`) installs a fresh token
+per action and does not have this effect.
 
 ## Session Construction
 
@@ -178,38 +320,60 @@ set to `true`. Production code should always use `Session::with_config`.
 `enter_environment(env, resolved_symtab, identifier, os_env_vars) -> Result<String, SessionError>`,
 where `resolved_symtab`, `identifier` and `os_env_vars` are all optional:
 
-1. Validates state is `Ready`
-2. Sets state to `Running`
-3. Resolves environment `variables` format strings against the current symbol table,
-   with target type `string` for whole-field expressions (Expression Language §1.3.2),
-   and rejects a resolved value that contains a NUL byte or exceeds 2048 characters
-   (Template Schemas §4.4.2 — the session is the enforcement stage for values that
-   are unknown at template validation; the limit is kept in sync with the model's
-   `EffectiveLimits::max_env_var_value_len`)
-4. Stores the environment, folding the `resolved_symtab` argument onto the stored copy's
+1. Validates state is `Ready`, that an explicit `identifier` isn't already entered, and
+   the RFC 0008 single wrap layer rule. A call that fails these is rejected and changes
+   nothing (see [Failures before an action starts](#failures-before-an-action-starts))
+2. Stores the environment, folding the `resolved_symtab` argument onto the stored copy's
    `Environment::resolved_symtab` field. A caller may supply an environment's resolved
    symbol table either way, and the two are equivalent: readers that run after this call
    returns — notably the RFC 0008 wrap hooks, which resolve a wrap environment's own
    scope off the stored `Environment` — see the same table whichever route was used.
    When a caller supplies both, the argument wins, being the more specific input for
    this entry.
-5. Pushes the environment onto `environments_entered` (LIFO stack)
-6. Creates an `EnvironmentScriptRunner` and calls `enter()` (runs `onEnter` action)
+3. Pushes the environment onto `environments_entered` (LIFO stack). From here on, a
+   failure fails the action and leaves the environment on the stack
+4. Builds the symbol table (see [Symbol Table Construction](#symbol-table-construction))
+5. Resolves environment `variables` format strings against that symbol table,
+   with target type `string` for whole-field expressions (Expression Language §1.3.2),
+   and rejects a resolved value that contains a NUL byte or exceeds 2048 characters
+   (Template Schemas §4.4.2 — the session is the enforcement stage for values that
+   are unknown at template validation; the limit is kept in sync with the model's
+   `EffectiveLimits::max_env_var_value_len`). Variables resolve in sorted key order and
+   all resolve before any is set, so a failure sets none of them and reports a
+   deterministic error when more than one is invalid
+6. Without an `onEnter`, records a `Success` action and returns. Otherwise sets state to
+   `Running`, creates an `EnvironmentScriptRunner` and calls `enter()` (runs the
+   `onEnter` action, or an outer environment's `onWrapEnvEnter` in its place)
 7. Processes `ActionMessage` values via `drive_action()` — env var changes from
    `openjd_env`/`openjd_unset_env` are applied to the environment's change set
 8. On success: state → `Ready` (or `ReadyEnding` if `ending_only`)
-9. On failure: state → `ReadyEnding`
+9. On failure the session is ending-only and the call returns the error: a failure
+   before the subprocess starts records a `Failed` action with the error's message,
+   while an `onEnter` that runs and ends non-`Success` leaves the action in its own
+   terminal state (`Failed`, `Canceled` or `Timeout`) and returns
+   `EnvironmentScriptFailed`
 
 ### Exit
 
 `exit_environment(identifier, resolved_symtab, keep_session_running, os_env_vars)`:
 
-1. Validates state is `Ready` or `ReadyEnding`
-2. Validates the identifier matches the most recently entered environment (LIFO order)
+1. Validates state is `Ready` or `ReadyEnding`, that the identifier is known, and that it
+   is the most recently entered environment (LIFO order). A call that fails these is
+   rejected and changes nothing
+2. Evaluates the action's environment variables, which still include the exiting
+   environment's own
 3. Sets `ending_only = true` unless `keep_session_running` is true
-4. Runs `onExit` action via `EnvironmentScriptRunner::exit()`
-5. Pops the environment from `environments_entered`
-6. Removes the environment's variable changes from the cumulative set
+4. Pops the environment from `environments_entered` and removes it, so its variable
+   changes no longer apply. This happens before anything that can fail, so a failed exit
+   still counts as an exit
+5. Builds the symbol table. A failure here, or anywhere before the `onExit` starts,
+   fails the action (see [Failures before an action starts](#failures-before-an-action-starts))
+6. Runs the `onExit` action (or an outer environment's `onWrapEnvExit` in its place) via
+   `EnvironmentScriptRunner::exit()`, if there is one
+7. On completion: state → `Ready` or `ReadyEnding` as for any other action. With
+   `keep_session_running` true, the state is `Ready` only if the session wasn't already
+   ending-only; `keep_session_running` never clears ending-only mode, and only
+   `clear_ending_only()` does (see [Brittle Sessions](#brittle-sessions))
 
 ### Why LIFO enforcement
 
@@ -221,9 +385,11 @@ in an inconsistent state. The Python library enforces this, and the Rust crate m
 
 `run_task(script, task_parameter_values, resolved_symtab, os_env_vars)`:
 
-1. Validates state is `Ready`
+1. Validates state is `Ready`; otherwise the call is rejected and changes nothing
 2. Sets state to `Running`
-3. Adds `Task.Param.*` and `Task.RawParam.*` to the symbol table
+3. Builds the symbol table, including `Task.Param.*` and `Task.RawParam.*`. A failure
+   here, or anywhere before the subprocess starts, fails the action (see
+   [Failures before an action starts](#failures-before-an-action-starts))
 4. Creates a `StepScriptRunner` and calls `run()` (runs `onRun` action)
 5. Processes `ActionMessage` values via `drive_action()`
 6. On completion: state → `Ready` or `ReadyEnding` based on result
@@ -354,7 +520,12 @@ parameter type when seeded, for `Param.*`, `RawParam.*`, `Task.Param.*`, and
 `Task.RawParam.*` alike: values cross the language boundary as strings (an INT parameter
 arrives as `"5"`), and typed expression evaluation requires typed symbols, so the value
 is converted via `ExprValue::coerce` (`"5"` → `Int(5)`, including element-wise coercion
-for list types). `CHUNK_INT` task parameters are exempt and remain strings — chunk range
+for list types). The string-to-`int` and string-to-`float` coercion ignores white space
+around the number (Expression Language §1.2.3, as for the numeric strings of Template
+Schemas §7.5): `" 5 "` → `Int(5)`, and
+`" 2.50 "` → a float that renders `2.50`. **Divergence from openjd-sessions-for-python:**
+Python does not parse parameter values, so it renders `" 5 "` as given.
+`CHUNK_INT` task parameters are exempt and remain strings — chunk range
 expressions are not numeric values. A value that cannot be coerced to its declared type
 (e.g. INT `"abc"`) fails symbol table construction with a `SessionError::Runtime` naming
 the parameter.
@@ -465,15 +636,21 @@ collects the cleanup and teardown guarantees in one place.
 `cleanup()` is the primary teardown API. It:
 1. Shuts down the cross-user helper (if active) via the `"shutdown"` protocol message
 2. For cross-user sessions: runs `sudo rm -rf` as the session user to remove files
-   owned by that user, then `remove_dir_all` as the process user for any remainder
-3. For same-user sessions: `remove_dir_all` on the working directory
+   owned by that user, then `TempDir::cleanup()` as the process user for any
+   remainder, as in step 3
+3. For same-user sessions: `TempDir::cleanup()` on the working directory, which
+   also removes the embedded files directory inside it. On Windows this can block
+   for at least about 31 s while it waits for open files to be released, logging a
+   warning after each failed pass (see tempdir.md "Cleanup retries on Windows").
+   If it still fails, logs the path and reason at error level and continues
 4. Sets state to `Ended`
 5. Skips directory removal if `retain_working_dir` is `true`
 
 ### Drop safety net
 
 If `cleanup()` is never called, `Session`'s `Drop` impl:
-1. Logs a warning ("Session::cleanup() was not called")
+1. Logs a warning ("Session '<id>' was dropped without calling cleanup(). Working
+   directory may not have been cleaned up.")
 2. Performs a best-effort `remove_dir_all` on the working directory
 3. Does **not** perform cross-user cleanup (no async, no sudo)
 4. Does **not** shut down the cross-user helper
@@ -630,9 +807,10 @@ during environment entry and task execution.
 ## Duplicate Environment Identifier Rejection
 
 When `enter_environment` is called with an explicit `identifier` that has already been
-entered in the session, it returns `SessionError::Runtime` with the message
-`"Environment {id} has already been entered in this Session."`. This prevents
-accidentally entering the same environment twice, which would corrupt the LIFO stack.
+entered in the session, it returns `SessionError::DuplicateEnvironment`, whose message is
+`"Environment {id} has already been entered in this Session."`, and changes nothing. This
+prevents accidentally entering the same environment twice, which would corrupt the LIFO
+stack.
 
 ## Environment Variable Normalization
 

@@ -132,8 +132,9 @@ execute(args).await
   └── 7. RESULTS
       ├── Treat any observed interruption as a failed run
       ├── Capture run duration (before filesystem cleanup)
+      ├── Cleanup session (unless --preserve) — on Windows this can block and
+      │   print per-pass warnings while it waits for open files
       ├── Print session summary (format depends on --output)
-      ├── Cleanup session (unless --preserve)
       └── Exit with code 1 if any action failed
 ```
 
@@ -174,8 +175,11 @@ Supplying `--task-param` or `--tasks` for such a step is rejected during preflig
 When `--task-param` or `--tasks` is provided, the CLI runs exactly the specified tasks.
 Task parameter values are injected as `Task.Param.<name>` and `Task.RawParam.<name>` in
 the symbol table. Each value is coerced to the type the step's parameter space declares
-for it (`coerce_task_params` in `run/params.rs`): `INT` and `FLOAT` values are parsed, and a
-`CHUNK[INT]` value is parsed as a range expression. For a `CONTIGUOUS` `CHUNK[INT]` parameter
+for it (`coerce_task_params` in `run/params.rs`): `INT` and `FLOAT` values are parsed, ignoring
+white space around the number as for a template's numeric strings (Template Schemas §7.5), so
+`--tasks '[{"Frame": " 7 "}]'` is `7`, and a `CHUNK[INT]` value is parsed as a range expression.
+The error for a value that does not parse quotes it as given
+(`Task parameter 'Frame': expected INT, got '7 0'`). For a `CONTIGUOUS` `CHUNK[INT]` parameter
 the value carries the contiguous display flag, so it is written `<N>-<M>` even with one or
 two values (`-t Frame=5-6` is written `5-6`, not `5,6`), as Template Schemas §3.4.1.5
 requires and as the chunks the CLI computes itself are.
@@ -272,14 +276,18 @@ Every entered environment — template, job, and step scoped — is tracked in a
 `entered_envs` list of `EnteredEnvironment` values containing its identifier,
 name, and optional step symbol table. A failed enter action marks the session
 failed but still records the environment (the session keeps a failed-enter environment on its stack),
-prints the failing action's `Process exited with code: N` line, and skips
+prints the failing action's `Process exited with code: N` line when it has an
+exit code (a failure before the action starts, such as a symbol table that can't
+be built, has none), and skips
 entering further environments and running tasks. Step environments are
 unwound to the pre-step baseline at the end of each step (or after a step-env
 enter failure); final cleanup then exits every remaining recorded environment
 in LIFO order. This is the OpenJD cleanup guarantee (extended to wrapped
 exits by RFC 0008 "Lifecycle and cleanup guarantees"): every environment
 entered or attempted has its `onExit` (or substituted `onWrapEnvExit`) run
-before the session ends. An environment rejected before entry is not recorded
+before the session ends, unless the exit call itself fails before its action
+starts (for example when the exit's symbol table can't be built), which the
+session counts as the exit. An environment rejected before entry is not recorded
 and not exited.
 
 ## Script Runtime Delegation

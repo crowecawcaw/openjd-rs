@@ -98,6 +98,21 @@ impl std::fmt::Display for SessionState {
     }
 }
 
+/// The lifecycle state a [`Session`] stores. It is [`SessionState`] without
+/// `ReadyEnding`.
+///
+/// Ending-only mode is stored only in `Session::ending_only`, the one source
+/// of truth for it (spec § Brittle Sessions). `ReadyEnding` is derived from
+/// `Ready` plus the flag in [`Session::state`]. Leaving the variant out of
+/// the stored type means no write can store it, so the two can't disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoredState {
+    Ready,
+    Running,
+    Canceling,
+    Ended,
+}
+
 /// Identifier for an environment within a session.
 pub type EnvironmentIdentifier = String;
 
@@ -184,6 +199,29 @@ fn format_exit_code(code: Option<i32>) -> String {
     match code {
         Some(c) => format!("exit code: {c}"),
         None => "exit code: N/A".to_string(),
+    }
+}
+
+/// Log a temporary directory that `Session::cleanup` could not delete. Cleanup
+/// continues, so without this the directory is left on disk with no trace.
+fn log_cleanup_failure(session_id: &str, path: &Path, err: &SessionError) {
+    crate::tempdir::emit_cleanup_log(Some(session_id), &cleanup_failure_log(path, err));
+}
+
+/// The error line for a directory `Session::cleanup` gave up on.
+fn cleanup_failure_log(path: &Path, err: &SessionError) -> crate::tempdir::CleanupLog {
+    let reason = match err {
+        SessionError::TempDir { source, .. } => crate::tempdir::os_error_text(source),
+        other => other.to_string(),
+    };
+    crate::tempdir::CleanupLog {
+        level: log::Level::Error,
+        content: LogContent::EXCEPTION_INFO | LogContent::FILE_PATH,
+        message: format!(
+            "Files within temporary directory {} could not be deleted: {}",
+            path.display(),
+            reason
+        ),
     }
 }
 
@@ -506,7 +544,12 @@ fn derive_library(
 )]
 pub struct Session {
     session_id: String,
-    state: SessionState,
+    /// The stored lifecycle state. Read it through [`Session::state`], which
+    /// derives `ReadyEnding` from `ending_only`.
+    state: StoredState,
+    /// Whether the session is ending-only. The only record of ending-only
+    /// mode: it persists through `Running` and `Canceling`, and
+    /// [`Session::state`] reports `Ready` with it set as `ReadyEnding`.
     ending_only: bool,
     working_directory: PathBuf,
     files_directory: PathBuf,
@@ -564,7 +607,7 @@ impl Session {
         let files_directory = working_directory.join("embedded_files");
         Self {
             session_id: String::new(),
-            state: SessionState::Ready,
+            state: StoredState::Ready,
             ending_only: false,
             working_directory,
             files_directory,
@@ -623,9 +666,26 @@ impl Session {
 
     /// Test-only: force the session state (typically to `Running`) so `cancel_action`
     /// will proceed without needing a full action run.
+    ///
+    /// It never clears ending-only mode. `ReadyEnding` stores `Ready` and
+    /// turns ending-only mode on. `Ready`, `Running`, `Canceling` and `Ended`
+    /// store that state and leave ending-only mode as it was, so on an
+    /// ending-only session `set_state_for_test(Ready)` makes
+    /// [`state`](Self::state) report `ReadyEnding`. As for every caller, the
+    /// only way back to `Ready` is
+    /// [`clear_ending_only`](Self::clear_ending_only).
     #[cfg(any(test, feature = "test-utils"))]
     pub fn set_state_for_test(&mut self, state: SessionState) {
-        self.state = state;
+        self.state = match state {
+            SessionState::ReadyEnding => {
+                self.ending_only = true;
+                StoredState::Ready
+            }
+            SessionState::Ready => StoredState::Ready,
+            SessionState::Running => StoredState::Running,
+            SessionState::Canceling => StoredState::Canceling,
+            SessionState::Ended => StoredState::Ended,
+        };
     }
 
     /// Test-only: inject job parameter values for unit-testing `build_symbol_table`.
@@ -796,7 +856,7 @@ impl Session {
 
         Ok(Self {
             session_id: config.session_id,
-            state: SessionState::Ready,
+            state: StoredState::Ready,
             ending_only: false,
             working_directory,
             files_directory,
@@ -946,12 +1006,20 @@ impl Session {
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
-    #[allow(
-        missing_docs,
-        reason = "missing-docs burn-down: predates the lint; document these items, then delete this attribute"
-    )]
+    /// The session's lifecycle state.
+    ///
+    /// `ReadyEnding` is derived: it is the stored `Ready` state while the
+    /// session is ending-only (spec § Brittle Sessions). Every state check
+    /// in this type goes through here, so ending-only mode has one source of
+    /// truth.
     pub fn state(&self) -> SessionState {
-        self.state
+        match self.state {
+            StoredState::Ready if self.ending_only => SessionState::ReadyEnding,
+            StoredState::Ready => SessionState::Ready,
+            StoredState::Running => SessionState::Running,
+            StoredState::Canceling => SessionState::Canceling,
+            StoredState::Ended => SessionState::Ended,
+        }
     }
     /// The session working directory.
     ///
@@ -1034,13 +1102,13 @@ impl Session {
         time_limit: Option<Duration>,
         mark_action_failed: bool,
     ) -> Result<(), SessionError> {
-        if self.state != SessionState::Running {
+        if self.state() != SessionState::Running {
             return Err(SessionError::InvalidState {
                 expected: vec![SessionState::Running],
-                current: self.state,
+                current: self.state(),
             });
         }
-        self.state = SessionState::Canceling;
+        self.state = StoredState::Canceling;
         if mark_action_failed {
             self.cancel.lock().mark_failed = true;
         }
@@ -1101,14 +1169,90 @@ impl Session {
         }
     }
 
-    /// Record a failure that occurred while setting up an action that has
-    /// already been reported as Running (e.g. wrap-symbol seeding or path
-    /// mapping materialization failing before the subprocess dispatch).
+    /// Take the session out of ending-only mode, moving it from
+    /// `ReadyEnding` back to `Ready` so that it accepts `run_task`,
+    /// `enter_environment` and `run_subprocess` again (spec § Brittle
+    /// Sessions).
+    ///
+    /// **Use with care.** By default a session is brittle: once an action
+    /// ends `Failed`, `Canceled` or `Timeout`, or `exit_environment` is
+    /// called with `keep_session_running = false`, the session only allows
+    /// exiting the environments it entered and `cleanup()`. This method is
+    /// for callers that deliberately want to keep running work after that.
+    /// The caller takes responsibility for the session's state: a failed or
+    /// canceled action can leave its work half done, and the session
+    /// neither checks nor undoes any of it.
+    ///
+    /// This is the only way from `ReadyEnding` back to `Ready`.
+    /// `exit_environment(.., keep_session_running = true, ..)` never does
+    /// it. The method clears ending-only mode whatever set it. It runs no
+    /// action and changes nothing else: the entered environments, the last
+    /// action's status and the environment variables stay as they were.
+    ///
+    /// It refuses, and leaves the session unchanged, when the session-wide
+    /// [`SessionConfig::cancel_token`] exists and has been canceled. That
+    /// cancellation is permanent — a tokio token can't be reset — so every
+    /// later action would end `Canceled` and make the session ending-only
+    /// again; the method won't return the session to `Ready` under a
+    /// cancellation it can't undo. Per-action cancels
+    /// ([`cancel_action`](Self::cancel_action) and
+    /// [`SessionCancelHandle`]) don't block it: only the session-wide token
+    /// does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::InvalidState`] if the session isn't
+    /// `ReadyEnding`, or [`SessionError::SessionCanceled`] if the
+    /// session-wide [`SessionConfig::cancel_token`] has been canceled.
+    pub fn clear_ending_only(&mut self) -> Result<(), SessionError> {
+        if self.state() != SessionState::ReadyEnding {
+            return Err(SessionError::InvalidState {
+                expected: vec![SessionState::ReadyEnding],
+                current: self.state(),
+            });
+        }
+        if let Some(token) = &self.cancel.parent_token {
+            if token.is_cancelled() {
+                return Err(SessionError::SessionCanceled);
+            }
+        }
+        // The stored state is already `Ready`: clearing the flag is all
+        // that takes the session from `ReadyEnding` to `Ready`.
+        self.ending_only = false;
+        Ok(())
+    }
+
+    /// Leave `Running`/`Canceling` once an action has reached the terminal
+    /// state `final_state` (spec § Brittle Sessions).
+    ///
+    /// A `Failed`, `Canceled` or `Timeout` action makes the session
+    /// ending-only until the caller calls
+    /// [`clear_ending_only`](Self::clear_ending_only). The stored state goes
+    /// back to `Ready` either way. `ending_only` is the only record of
+    /// ending-only mode, and [`state`](Self::state) derives `ReadyEnding`
+    /// from it, so `Ready` is reported only while the session isn't
+    /// ending-only. Every path that ends an action goes through here, which
+    /// is what lets the `state() == Ready` checks in `run_task`,
+    /// `enter_environment` and `run_subprocess` enforce the contract on
+    /// their own.
+    fn settle_after_action(&mut self, final_state: ActionState) {
+        if final_state != ActionState::Success {
+            self.ending_only = true;
+        }
+        self.state = StoredState::Ready;
+    }
+
+    /// Record a failure that occurred after a call was accepted but before
+    /// its action's subprocess started (e.g. the symbol table failing to
+    /// build, wrap-symbol seeding or path mapping materialization failing
+    /// before the subprocess dispatch). Such a failure fails the action,
+    /// as in the Python runtime (spec § Failures before an action starts).
     ///
     /// Without this, an early `?` return would leave the session state
-    /// permanently `Running` with no terminal `ActionStatus` — callers
-    /// polling for completion (notably the Python bindings) would hang, and
-    /// nothing about the failure would appear in the session log.
+    /// `Running` with no terminal `ActionStatus` — callers polling for
+    /// completion (notably the Python bindings) would hang — or leave it
+    /// `Ready` with the previous action's status, and nothing about the
+    /// failure would appear in the session log.
     ///
     /// Marks the action Failed with the error message, resets cancellation
     /// state, drops out of Running, logs the failure, and notifies the
@@ -1125,13 +1269,29 @@ impl Session {
         self.action.ended_at = Some(std::time::SystemTime::now());
         self.action.exit_code = None;
         self.cancel.reset();
-        self.state = SessionState::ReadyEnding;
+        self.settle_after_action(ActionState::Failed);
         self.notify_callback();
         e
     }
 
+    /// [`fail_action_setup`](Self::fail_action_setup) for a failure before
+    /// the action was reported as `Running`: starts a new action status (so
+    /// the previous action's doesn't linger) and logs the call's section
+    /// `banner` first, so the failure appears under it in the session log.
+    fn fail_action_before_start(&mut self, banner: &str, e: SessionError) -> SessionError {
+        self.action.reset();
+        log_section_banner(&self.session_id, banner);
+        self.fail_action_setup(e)
+    }
+
     /// Clean up the session. Deletes working directory if not retained.
     pub fn cleanup(&mut self) {
+        self.cleanup_with_delays(crate::tempdir::CLEANUP_RETRY_DELAYS);
+    }
+
+    /// [`Self::cleanup`], retrying a failed removal after each of `delays`, so
+    /// tests can shorten them.
+    fn cleanup_with_delays(&mut self, delays: &[Duration]) {
         if self.cleanup_called {
             return;
         }
@@ -1184,17 +1344,24 @@ impl Session {
                 }
             }
 
-            // If we own TempDirs, clean them up; otherwise fall back to remove_dir_all
-            if let Some(ref mut files_dir) = self._files_dir {
-                let _ = files_dir.cleanup();
-            }
+            // `_working_dir` and `_files_dir` are set together (both `Some` for
+            // a real session, both `None` only in unit tests), so the files
+            // directory is cleaned as part of the working directory it lives
+            // in. Removing it separately first would wait out the retries twice
+            // when it is the one holding a locked file.
             if let Some(ref mut working_dir) = self._working_dir {
-                let _ = working_dir.cleanup();
+                if let Some(ref mut files_dir) = self._files_dir {
+                    files_dir.mark_cleaned_up();
+                }
+                if let Err(e) = working_dir.cleanup_with_delays(Some(&self.session_id), delays) {
+                    log_cleanup_failure(&self.session_id, working_dir.path(), &e);
+                }
             } else {
+                // No owned TempDirs: the test constructor. Best-effort removal.
                 let _ = std::fs::remove_dir_all(&self.working_directory);
             }
         }
-        self.state = SessionState::Ended;
+        self.state = StoredState::Ended;
     }
 
     /// Enter an environment asynchronously (non-blocking).
@@ -1205,6 +1372,26 @@ impl Session {
     /// stored environment, so readers that run after this call returns — notably
     /// the RFC 0008 wrap hooks — see it either way. If both are supplied, the
     /// argument wins.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::InvalidState`] if the session isn't `Ready`,
+    /// [`SessionError::DuplicateEnvironment`] if `identifier` is already
+    /// entered, or [`SessionError::MultipleWrapEnvironments`] under the RFC
+    /// 0008 single-layer rule. These change nothing.
+    ///
+    /// Any other error fails the action and makes the session ending-only;
+    /// the environment stays entered, so the caller must still exit it (it
+    /// is the last entry of
+    /// [`environments_entered`](Self::environments_entered)). For a failure
+    /// before the `onEnter` subprocess starts — an undeserializable
+    /// `resolved_symtab`, a `variables` value that can't be resolved, a path
+    /// mapping or wrap-hook setup error — the action status is `Failed` with
+    /// the error's message, as in the Python runtime; this is the only kind
+    /// of failure possible when the environment has no `onEnter`. If the
+    /// `onEnter` runs and ends non-`Success`, the error is
+    /// [`SessionError::EnvironmentScriptFailed`] and the action status is
+    /// that terminal state (`Failed`, `Canceled` or `Timeout`).
     pub async fn enter_environment(
         &mut self,
         env: &Environment,
@@ -1219,6 +1406,10 @@ impl Session {
     }
 
     /// Enter an environment, returning both the identifier and the stdout from the onEnter script.
+    ///
+    /// # Errors
+    ///
+    /// As for [`enter_environment`](Self::enter_environment).
     pub async fn enter_environment_with_output(
         &mut self,
         env: &Environment,
@@ -1226,11 +1417,16 @@ impl Session {
         identifier: Option<&str>,
         os_env_vars: Option<&HashMap<String, String>>,
     ) -> Result<(String, String), SessionError> {
-        if self.state != SessionState::Ready {
+        if self.state() != SessionState::Ready {
             return Err(SessionError::InvalidState {
                 expected: vec![SessionState::Ready],
-                current: self.state,
+                current: self.state(),
             });
+        }
+        if let Some(id) = identifier {
+            if self.environments.contains_key(id) {
+                return Err(SessionError::DuplicateEnvironment { id: id.to_string() });
+            }
         }
 
         // RFC 0008 single-layer rule: at most one environment in the session
@@ -1254,15 +1450,8 @@ impl Session {
             }
         }
 
-        let symtab = self.build_symbol_table(None, resolved_symtab)?;
-
         let identifier = match identifier {
-            Some(id) => {
-                if self.environments.contains_key(id) {
-                    return Err(SessionError::DuplicateEnvironment { id: id.to_string() });
-                }
-                id.to_string()
-            }
+            Some(id) => id.to_string(),
             None => format!("{}:{}", self.session_id, uuid::Uuid::new_v4().simple()),
         };
         // A caller may supply an environment's resolved symbol table either on
@@ -1282,58 +1471,26 @@ impl Session {
         self.created_env_vars
             .insert(identifier.clone(), HashMap::new());
 
-        // Set static variables
-        if let Some(vars) = &env.variables {
-            for (key, fmt_str) in vars {
-                // Required string values (§4.4.2): a single whole-field
-                // expression resolves with target type `string`
-                // (Expression Language §1.3.2), so `null` and list values
-                // are errors rather than display renderings.
-                let value = fmt_str
-                    .resolve_with(
-                        &symtab,
-                        &crate::limits::fs_options(self.lib(), &self.limits)
-                            .with_target_type(&openjd_expr::ExprType::STRING),
-                    )
-                    .map(|v| match v {
-                        openjd_expr::ExprValue::String(s) => s,
-                        other => other.to_display_string(),
-                    })
-                    .map_err(|e| SessionError::FormatString {
-                        context: format!("env var '{key}'"),
-                        reason: e.to_string(),
-                    })?;
-                // A NUL in the resolved value would poison every subsequent
-                // Command::spawn in the session. Reject it here so the
-                // environment entry fails cleanly rather than bricking later
-                // actions — including the environment's own onExit teardown.
-                if value.contains('\0') {
-                    return Err(SessionError::FormatString {
-                        context: format!("env var '{key}'"),
-                        reason: "resolved value contains a NUL byte, which cannot be represented in a process environment.".to_string(),
-                    });
-                }
-                // Template Schemas §4.4.2: at most 2048 characters. This is
-                // the enforcement stage — template validation only catches
-                // statically knowable violations (an interpolation of an
-                // unresolved symbol contributes 0 to its lower bound), so a
-                // value that only becomes long here must be rejected here.
-                // Kept in sync with the model's
-                // EffectiveLimits::max_env_var_value_len.
-                let char_count = value.chars().count();
-                if char_count > ENV_VAR_VALUE_MAX_LEN {
-                    return Err(SessionError::FormatString {
-                        context: format!("env var '{key}'"),
-                        reason: format!(
-                            "resolved value is {char_count} characters, exceeding the maximum of {ENV_VAR_VALUE_MAX_LEN}."
-                        ),
-                    });
-                }
-                let norm_key = normalize_env_key(key);
-                self.env_vars.insert(norm_key.clone(), value.clone());
-                if let Some(changes) = self.created_env_vars.get_mut(&identifier) {
-                    changes.insert(norm_key, Some(value));
-                }
+        // From here on the call has been accepted and the environment is on
+        // the stack, so a failure fails the action (spec § Enter): the
+        // caller learns of it from the error and the action status, and
+        // exits the environment as usual.
+        let banner = format!("Entering Environment: {}", env.name);
+        let symtab = match self.build_symbol_table(None, resolved_symtab) {
+            Ok(symtab) => symtab,
+            Err(e) => return Err(self.fail_action_before_start(&banner, e)),
+        };
+
+        // Set static variables. All of them resolve before any is set, so a
+        // failure sets none of them, as in the Python runtime.
+        let variables = match self.resolve_env_variables(env, &symtab) {
+            Ok(variables) => variables,
+            Err(e) => return Err(self.fail_action_before_start(&banner, e)),
+        };
+        for (norm_key, value) in variables {
+            self.env_vars.insert(norm_key.clone(), value.clone());
+            if let Some(changes) = self.created_env_vars.get_mut(&identifier) {
+                changes.insert(norm_key, Some(value));
             }
         }
 
@@ -1344,7 +1501,7 @@ impl Session {
             .is_some()
         {
             self.action.reset();
-            self.state = SessionState::Running;
+            self.state = StoredState::Running;
             self.notify_callback();
 
             log_section_banner(
@@ -1540,17 +1697,105 @@ impl Session {
             String::new()
         };
 
-        if self.state == SessionState::Running {
-            self.state = SessionState::Ready;
-        }
         Ok((identifier, output))
+    }
+
+    /// Resolve the values of `env`'s `variables` against `symtab`,
+    /// returning each as a `(normalized name, value)` pair. Nothing is set
+    /// here, so the caller can set all of them or, on an error, none.
+    fn resolve_env_variables(
+        &self,
+        env: &Environment,
+        symtab: &SymbolTable,
+    ) -> Result<Vec<(String, String)>, SessionError> {
+        let Some(vars) = &env.variables else {
+            return Ok(Vec::new());
+        };
+        // Resolve in sorted key order so that, when more than one variable
+        // is invalid, the error reported is deterministic rather than
+        // dependent on `HashMap` iteration order. Nothing observable depends
+        // on the order the valid ones are returned in (they go into a map).
+        let mut entries: Vec<(&String, &openjd_model::FormatString)> = vars.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        let mut resolved = Vec::with_capacity(entries.len());
+        for (key, fmt_str) in entries {
+            // Required string values (§4.4.2): a single whole-field
+            // expression resolves with target type `string`
+            // (Expression Language §1.3.2), so `null` and list values
+            // are errors rather than display renderings.
+            let value = fmt_str
+                .resolve_with(
+                    symtab,
+                    &crate::limits::fs_options(self.lib(), &self.limits)
+                        .with_target_type(&openjd_expr::ExprType::STRING),
+                )
+                .map(|v| match v {
+                    openjd_expr::ExprValue::String(s) => s,
+                    other => other.to_display_string(),
+                })
+                .map_err(|e| SessionError::FormatString {
+                    context: format!("env var '{key}'"),
+                    reason: e.to_string(),
+                })?;
+            // A NUL in the resolved value would poison every subsequent
+            // Command::spawn in the session. Reject it here so the
+            // environment entry fails cleanly rather than bricking later
+            // actions — including the environment's own onExit teardown.
+            if value.contains('\0') {
+                return Err(SessionError::FormatString {
+                    context: format!("env var '{key}'"),
+                    reason: "resolved value contains a NUL byte, which cannot be represented in a process environment.".to_string(),
+                });
+            }
+            // Template Schemas §4.4.2: at most 2048 characters. This is
+            // the enforcement stage — template validation only catches
+            // statically knowable violations (an interpolation of an
+            // unresolved symbol contributes 0 to its lower bound), so a
+            // value that only becomes long here must be rejected here.
+            // Kept in sync with the model's
+            // EffectiveLimits::max_env_var_value_len.
+            let char_count = value.chars().count();
+            if char_count > ENV_VAR_VALUE_MAX_LEN {
+                return Err(SessionError::FormatString {
+                    context: format!("env var '{key}'"),
+                    reason: format!(
+                        "resolved value is {char_count} characters, exceeding the maximum of {ENV_VAR_VALUE_MAX_LEN}."
+                    ),
+                });
+            }
+            resolved.push((normalize_env_key(key), value));
+        }
+        Ok(resolved)
     }
 
     /// Exit an environment asynchronously, identified by its environment identifier.
     ///
     /// Environments must be exited in LIFO order (last entered, first exited).
-    /// The `keep_session_running` parameter controls whether the session transitions
-    /// to `ReadyEnding` after exit — if `false`, the session becomes ending-only.
+    /// If `keep_session_running` is `false`, the session becomes ending-only and
+    /// is `ReadyEnding` after the exit. If it is `true`, the exit itself
+    /// doesn't make the session ending-only, though an `onExit` that ends
+    /// `Failed`, `Canceled` or `Timeout` still does, like any other action.
+    /// It never brings an ending-only session
+    /// back to `Ready`. A session that is already
+    /// ending-only, for example because an action ended `Failed`, `Canceled` or
+    /// `Timeout`, stays `ReadyEnding` until the caller calls
+    /// [`clear_ending_only`](Self::clear_ending_only).
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::InvalidState`] if the session isn't `Ready` or
+    /// `ReadyEnding`, [`SessionError::UnknownEnvironment`], or
+    /// [`SessionError::LifoViolation`]. These change nothing.
+    ///
+    /// Any other error fails the action and makes the session ending-only.
+    /// The environment has already been removed, so the failed exit still
+    /// counts as an exit. For a failure before the `onExit` subprocess
+    /// starts — an undeserializable `resolved_symtab`, a path mapping or
+    /// wrap-hook setup error — the action status is `Failed` with the
+    /// error's message; this is the only kind possible when there is no
+    /// `onExit`. If the `onExit` runs and ends non-`Success`, the error is
+    /// [`SessionError::EnvironmentScriptFailed`] and the action status is
+    /// that terminal state (`Failed`, `Canceled` or `Timeout`).
     pub async fn exit_environment(
         &mut self,
         identifier: &EnvironmentIdentifier,
@@ -1558,10 +1803,13 @@ impl Session {
         keep_session_running: bool,
         os_env_vars: Option<&HashMap<String, String>>,
     ) -> Result<String, SessionError> {
-        if self.state != SessionState::Ready && self.state != SessionState::ReadyEnding {
+        if !matches!(
+            self.state(),
+            SessionState::Ready | SessionState::ReadyEnding
+        ) {
             return Err(SessionError::InvalidState {
                 expected: vec![SessionState::Ready, SessionState::ReadyEnding],
-                current: self.state,
+                current: self.state(),
             });
         }
 
@@ -1583,8 +1831,6 @@ impl Session {
                 got: identifier.clone(),
             });
         }
-
-        let symtab = self.build_symbol_table(None, resolved_symtab)?;
 
         // Evaluate env vars BEFORE removing from tracking (matching Python)
         // Box to keep off the async state machine — see run_task for rationale.
@@ -1614,6 +1860,17 @@ impl Session {
             self.wrap_env_file_records.remove(identifier);
         }
 
+        // As in the Python runtime, the symbol table is built only once the
+        // environment is off the stack: a failure here fails the action, and
+        // the failed exit still counts as an exit.
+        let symtab = match self.build_symbol_table(None, resolved_symtab) {
+            Ok(symtab) => symtab,
+            Err(e) => {
+                let banner = format!("Exiting Environment: {}", env.name);
+                return Err(self.fail_action_before_start(&banner, e));
+            }
+        };
+
         let output = if env
             .script
             .as_ref()
@@ -1621,7 +1878,7 @@ impl Session {
             .is_some()
         {
             self.action.reset();
-            self.state = SessionState::Running;
+            self.state = StoredState::Running;
             self.notify_callback();
 
             log_section_banner(
@@ -1783,7 +2040,6 @@ impl Session {
             let result = result?;
 
             if result.state != ActionState::Success {
-                self.state = SessionState::ReadyEnding;
                 return Err(SessionError::EnvironmentScriptFailed {
                     name: env.name.clone(),
                     action: "onExit".into(),
@@ -1792,7 +2048,7 @@ impl Session {
             }
             result.stdout.clone()
         } else {
-            // No exit script — set state based on ending_only (drive_action not called)
+            // No exit script, so drive_action is not called: settle here.
             let now = std::time::SystemTime::now();
             self.action.state = Some(ActionState::Success);
             self.action.started_at = Some(now);
@@ -1800,11 +2056,7 @@ impl Session {
             self.action.status_message = None;
             self.action.fail_message = None;
             self.action.exit_code = None;
-            self.state = if self.ending_only {
-                SessionState::ReadyEnding
-            } else {
-                SessionState::Ready
-            };
+            self.settle_after_action(ActionState::Success);
 
             log_section_banner(
                 &self.session_id,
@@ -1830,6 +2082,17 @@ impl Session {
     /// `step_name` is the name of the step whose task is being run; it is
     /// surfaced as `WrappedStep.Name` to a wrapping environment's
     /// `onWrapTaskRun` hook (RFC 0008).
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::InvalidState`] if the session isn't `Ready`, which
+    /// changes nothing. Any other error is a failed action: the action
+    /// status is `Failed` with the error's message and the session is
+    /// ending-only. That covers both a failure before the subprocess starts
+    /// (an undeserializable `resolved_symtab`, a task parameter value that
+    /// can't be coerced to its type) and one from dispatching it (a command
+    /// that can't be started). An action that runs to a non-`Success` state
+    /// returns `Ok` with that state.
     pub async fn run_task(
         &mut self,
         step_name: &str,
@@ -1838,20 +2101,22 @@ impl Session {
         resolved_symtab: Option<&openjd_expr::SerializedSymbolTable>,
         os_env_vars: Option<&HashMap<String, String>>,
     ) -> Result<ActionResult, SessionError> {
-        if self.state != SessionState::Ready {
+        if self.state() != SessionState::Ready {
             return Err(SessionError::InvalidState {
                 expected: vec![SessionState::Ready],
-                current: self.state,
+                current: self.state(),
             });
         }
 
-        let symtab = self.build_symbol_table(task_parameter_values, resolved_symtab)?;
-
         self.action.reset();
-        self.state = SessionState::Running;
+        self.state = StoredState::Running;
         self.notify_callback();
 
         log_section_banner(&self.session_id, "Running Task");
+
+        let symtab = self
+            .build_symbol_table(task_parameter_values, resolved_symtab)
+            .map_err(|e| self.fail_action_setup(e))?;
 
         let cancel_token = self.new_action_cancel_token();
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(None);
@@ -2067,10 +2332,10 @@ impl Session {
         use_session_env_vars: bool,
         log_banner_message: Option<&str>,
     ) -> Result<crate::subprocess::SubprocessResult, SessionError> {
-        if self.state != SessionState::Ready {
+        if self.state() != SessionState::Ready {
             return Err(SessionError::InvalidState {
                 expected: vec![SessionState::Ready],
-                current: self.state,
+                current: self.state(),
             });
         }
         if command.is_empty() || command.trim().is_empty() {
@@ -2089,7 +2354,7 @@ impl Session {
         }
 
         self.action.reset();
-        self.state = SessionState::Running;
+        self.state = StoredState::Running;
         self.notify_callback();
 
         let env_vars = if use_session_env_vars {
@@ -2245,11 +2510,7 @@ impl Session {
         self.action.ended_at = Some(std::time::SystemTime::now());
         self.action.exit_code = r.exit_code;
         self.cancel.reset();
-        self.state = if final_state == ActionState::Success {
-            SessionState::Ready
-        } else {
-            SessionState::ReadyEnding
-        };
+        self.settle_after_action(final_state);
         self.notify_callback();
         Ok(crate::subprocess::SubprocessResult {
             state: final_state,
@@ -2313,7 +2574,7 @@ impl Session {
                 self.action.ended_at = Some(std::time::SystemTime::now());
                 self.action.exit_code = None;
                 self.cancel.reset();
-                self.state = SessionState::ReadyEnding;
+                self.settle_after_action(ActionState::Failed);
 
                 if let Some(cb) = &self.callback {
                     if let Some(status) = self.action_status() {
@@ -2337,12 +2598,7 @@ impl Session {
         self.action.ended_at = Some(std::time::SystemTime::now());
         self.action.exit_code = r.exit_code;
         self.cancel.reset();
-
-        self.state = if self.ending_only || final_state != ActionState::Success {
-            SessionState::ReadyEnding
-        } else {
-            SessionState::Ready
-        };
+        self.settle_after_action(final_state);
 
         if let Some(cb) = &self.callback {
             if let Some(status) = self.action_status() {
@@ -3490,6 +3746,122 @@ mod wrap_actions_tests {
 }
 
 #[cfg(test)]
+mod cleanup_failure_log_tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_failure_is_an_error_naming_the_path_and_reason() {
+        let err = SessionError::TempDir {
+            path: PathBuf::from("session-dir"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "file in use."),
+        };
+        let line = cleanup_failure_log(Path::new("session-dir"), &err);
+        assert_eq!(line.level, log::Level::Error);
+        // Literal so a changed flag fails here: FILE_PATH (2) | EXCEPTION_INFO (16).
+        assert_eq!(line.content.bits(), 18);
+        assert_eq!(
+            line.message,
+            "Files within temporary directory session-dir could not be deleted: file in use"
+        );
+    }
+
+    #[test]
+    fn cleanup_failure_is_logged_through_the_session_logger() {
+        testing_logger::setup();
+        let err = SessionError::TempDir {
+            path: PathBuf::from("session-dir"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "file in use"),
+        };
+        log_cleanup_failure("session-1", Path::new("session-dir"), &err);
+        testing_logger::validate(|logs| {
+            assert_eq!(logs.len(), 1);
+            assert_eq!(logs[0].level, log::Level::Error);
+            assert_eq!(logs[0].target, "openjd.sessions");
+            assert_eq!(
+                logs[0].body,
+                "Files within temporary directory session-dir could not be deleted: file in use"
+            );
+        });
+    }
+
+    /// A file held open in the embedded files directory for the whole cleanup:
+    /// only the working directory's removal is retried, each attempt is warned
+    /// about, the directory left behind is logged as an error, and the session
+    /// ends.
+    #[cfg(windows)]
+    #[test]
+    fn session_cleanup_logs_a_directory_it_cannot_remove() {
+        use std::os::windows::fs::OpenOptionsExt;
+        testing_logger::setup();
+        let root = tempfile::tempdir().unwrap();
+        let mut session = Session::with_config(SessionConfig {
+            limits: Default::default(),
+            session_id: "session-1".into(),
+            job_parameter_values: Default::default(),
+            session_root_directory: Some(root.path().to_path_buf()),
+            path_mapping_rules: None,
+            retain_working_dir: false,
+            callback: None,
+            os_env_vars: None,
+            user: None,
+            profile: None,
+            cancel_token: None,
+            debug_collect_stdout: false,
+            echo_openjd_directives: true,
+            sticky_bit_policy: crate::tempdir::StickyBitPolicy::Disabled,
+        })
+        .unwrap();
+        let wd = session.working_directory().to_path_buf();
+        let held_path = session.files_directory().join("locked.bin");
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(&held_path)
+            .unwrap();
+
+        session.cleanup_with_delays(&[Duration::from_millis(10)]);
+
+        assert_eq!(session.state(), SessionState::Ended);
+        let exe = std::env::current_exe().unwrap();
+        let reason = "The process cannot access the file because it is being used by \
+                      another process";
+        let warning = |end: &str| {
+            format!(
+                "Could not delete temporary directory {}: {reason}. 1 file(s) could not be \
+                 deleted, including {}. Files are still locked open by: {} (pid {}). {end}",
+                wd.display(),
+                held_path.strip_prefix(&wd).unwrap().display(),
+                exe.file_name().unwrap().to_string_lossy(),
+                std::process::id()
+            )
+        };
+        let expected = [
+            (log::Level::Warn, warning("Retrying in 0.01 s.")),
+            (log::Level::Warn, warning("Giving up.")),
+            (
+                log::Level::Error,
+                format!(
+                    "Files within temporary directory {} could not be deleted: {reason}",
+                    wd.display()
+                ),
+            ),
+        ];
+        testing_logger::validate(|logs| {
+            let problems: Vec<_> = logs
+                .iter()
+                .filter(|l| l.level <= log::Level::Warn)
+                .map(|l| (l.level, l.body.clone()))
+                .collect();
+            assert_eq!(problems, expected);
+        });
+        drop(held);
+        std::fs::remove_dir_all(&wd).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod typed_param_seeding_tests {
     //! RED tests for Gap 11: parameter values arrive as strings across the PyO3
     //! boundary and the session symbol table must coerce them to their declared
@@ -3906,6 +4278,61 @@ mod typed_param_seeding_tests {
         assert_eq!(result, "value=2.500");
     }
 
+    #[test]
+    fn padded_numeric_values_ignore_white_space() {
+        // Seeding coerces an INT or FLOAT value given as a string, and that
+        // coercion ignores white space around the number (Expression Language
+        // §1.2.3, as for Template Schemas §7.5 numeric strings), for job and
+        // task parameters; a FLOAT keeps its text without the white space.
+        let symtab = build_symtab_with_task_params(
+            vec![
+                ("N", JobParameterType::Int, ExprValue::String(" 5 ".into())),
+                (
+                    "V",
+                    JobParameterType::Float,
+                    ExprValue::String("\t2.50\u{3000}".into()),
+                ),
+            ],
+            vec![
+                ("I", TaskParameterType::Int, ExprValue::String("7\n".into())),
+                (
+                    "F",
+                    TaskParameterType::Float,
+                    ExprValue::String("\u{a0}1.250".into()),
+                ),
+            ],
+        )
+        .unwrap();
+        let result = eval_str(
+            &symtab,
+            "{{RawParam.N}} {{Param.V}} {{Task.RawParam.I}} {{Task.Param.F}}",
+        )
+        .unwrap();
+        assert_eq!(result, "5 2.50 7 1.250");
+        assert_eq!(
+            eval_expr(&symtab, "{{Param.N + Task.Param.I}}").unwrap(),
+            ExprValue::Int(12)
+        );
+        // Other characters, and white space inside the number, are errors.
+        for (value, reason) in [
+            ("\u{200b}5", "invalid digit found in string"),
+            ("5\u{1c}", "invalid digit found in string"),
+            ("5 0", "invalid digit found in string"),
+        ] {
+            let msg = build_symtab_from_scratch(vec![(
+                "N",
+                JobParameterType::Int,
+                ExprValue::String(value.into()),
+            )])
+            .expect_err("expected an error")
+            .to_string();
+            assert_eq!(
+                msg,
+                format!("Failed to coerce parameter 'RawParam.N': Cannot convert '{value}' to int: {reason}")
+            );
+        }
+    }
+
     // ── Bad values (must produce errors, not panics or silent passthrough) ──
 
     #[test]
@@ -3959,5 +4386,68 @@ mod typed_param_seeding_tests {
             "Failed to coerce parameter 'RawParam.Tiles': \
              Cannot convert 'abc' to int: invalid digit found in string"
         );
+    }
+}
+
+#[cfg(test)]
+mod stored_state_tests {
+    //! Ending-only mode is stored only in `Session::ending_only`, and
+    //! `ReadyEnding` is derived from it (spec § Brittle Sessions). These
+    //! tests pin `state()`'s mapping and `set_state_for_test`'s translation
+    //! against the private fields. Behavior is covered end to end in
+    //! `tests/integration/test_brittle_session.rs`.
+    use super::*;
+
+    fn session(tmp: &tempfile::TempDir) -> Session {
+        Session::new_for_test(tmp.path().to_path_buf())
+    }
+
+    /// `state()` for every stored state, with and without ending-only mode.
+    #[test]
+    fn state_derives_ready_ending_from_the_flag() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut s = session(&tmp);
+        for (stored, ending_only, expected) in [
+            (StoredState::Ready, false, SessionState::Ready),
+            (StoredState::Ready, true, SessionState::ReadyEnding),
+            (StoredState::Running, false, SessionState::Running),
+            (StoredState::Running, true, SessionState::Running),
+            (StoredState::Canceling, false, SessionState::Canceling),
+            (StoredState::Canceling, true, SessionState::Canceling),
+            (StoredState::Ended, false, SessionState::Ended),
+            (StoredState::Ended, true, SessionState::Ended),
+        ] {
+            s.state = stored;
+            s.ending_only = ending_only;
+            assert_eq!(
+                s.state(),
+                expected,
+                "{stored:?}, ending_only = {ending_only}"
+            );
+        }
+    }
+
+    /// `set_state_for_test` never clears ending-only mode: `ReadyEnding`
+    /// stores `Ready` and sets the flag, and every other state is stored as
+    /// given with the flag left as it was.
+    #[test]
+    fn set_state_for_test_never_clears_ending_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for ending_only in [false, true] {
+            for (requested, stored, flag_after) in [
+                (SessionState::ReadyEnding, StoredState::Ready, true),
+                (SessionState::Ready, StoredState::Ready, ending_only),
+                (SessionState::Running, StoredState::Running, ending_only),
+                (SessionState::Canceling, StoredState::Canceling, ending_only),
+                (SessionState::Ended, StoredState::Ended, ending_only),
+            ] {
+                let mut s = session(&tmp);
+                s.ending_only = ending_only;
+                s.set_state_for_test(requested);
+                let what = format!("{requested:?} with ending_only = {ending_only}");
+                assert_eq!(s.state, stored, "{what}");
+                assert_eq!(s.ending_only, flag_after, "{what}");
+            }
+        }
     }
 }

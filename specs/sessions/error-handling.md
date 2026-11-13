@@ -52,6 +52,9 @@ pub enum SessionError {
 
     #[error("Must exit the most recently entered environment first. Expected {expected}, got {got}")]
     LifoViolation { expected: String, got: String },
+
+    #[error("The session was canceled through its session-wide cancel token and cannot be continued.")]
+    SessionCanceled,
 }
 ```
 
@@ -141,21 +144,57 @@ Covers protocol errors, unexpected helper exit, and stdin/stdout pipe failures.
 Returned when `exit_environment` is called out of LIFO order. The `expected` field is
 the identifier that should be exited next; `got` is the identifier that was requested.
 
+### SessionCanceled
+
+Returned by `clear_ending_only()` when the session-wide
+`SessionConfig::cancel_token` has been canceled. A tokio `CancellationToken` can't be
+reset once canceled, so every later action would end `Canceled` and make the session
+ending-only again. Rather than return the session to `Ready` under a cancellation it
+can't undo, `clear_ending_only()` refuses and leaves the session `ReadyEnding`; only
+`exit_environment()` and `cleanup()` remain. Per-action cancels (`cancel_action()` and
+`SessionCancelHandle`) don't raise this — they install a fresh token per action.
+
 ## Error Propagation Patterns
 
 ### Runner → Session
 
 Runners return `Result<SubprocessResult, SessionError>`. The session maps these to
 state transitions:
-- `Ok(result)` with `result.state == Success` → `Ready` (or `ReadyEnding`)
-- `Ok(result)` with `result.state == Failed` → `ReadyEnding`
-- `Err(e)` → `ReadyEnding` + error logged
+- `Ok(result)` with `result.state == Success` → `Ready` (or `ReadyEnding` if the session
+  is ending-only)
+- `Ok(result)` with `result.state` `Failed`, `Canceled` or `Timeout` → ending-only,
+  `ReadyEnding`
+- `Err(e)` → ending-only, `ReadyEnding` + error logged
+
+See [session.md § Brittle Sessions](session.md#brittle-sessions).
+
+### Rejections and failed actions
+
+An error from `enter_environment`, `exit_environment`, `run_task` or `run_subprocess` is
+one of two kinds:
+
+- **A rejection**, from the up-front checks: `InvalidState`, `DuplicateEnvironment`,
+  `MultipleWrapEnvironments`, `UnknownEnvironment`, `LifoViolation`, and `run_subprocess`'s
+  `Runtime` argument checks. It changes nothing: the state, the entered environments and
+  the last action's status are as they were, and no callback fires.
+- **A failed action**, for any error once the call is accepted. For a failure before the
+  subprocess starts (building the symbol table, resolving an environment's `variables`,
+  path mapping, wrap-hook setup) the action status is `Failed` with the error's message;
+  this matches the Python library, which reports these through `action_status` without
+  raising. For an `onEnter`/`onExit` that runs and ends non-`Success`, the error is
+  `EnvironmentScriptFailed` and the action status is the script's own terminal state
+  (`Failed`, `Canceled` or `Timeout`); `run_task` instead returns `Ok` with that state.
+  Either way the session is ending-only.
+
+The table in
+[session.md § Failures before an action starts](session.md#failures-before-an-action-starts)
+lists the rejections per call.
 
 ### Format string errors
 
 Format string resolution can fail at multiple points:
 - `resolve_action_args()` — command/args resolution
-- `evaluate_env_vars()` — environment variable resolution
+- environment `variables` resolution in `enter_environment`
 - `write_file_contents()` — embedded file data resolution
 
 All are wrapped in `SessionError::FormatString` with context describing the operation.
