@@ -272,14 +272,14 @@ pushing. Run locally whatever your change can affect.
 |---|---|---|
 | **DCO** | Every commit carries a `Signed-off-by:` line matching its author. Sign off as you commit: fixing a missed one later means rewriting history. | `git commit -s` |
 | **Semantic PR** | Passes when the PR title or at least one commit is a [conventional commit](https://www.conventionalcommits.org/), so it does not check the title by itself. Give the title a conventional-commit summary of the whole change: PRs are squash-merged, so the title becomes the commit on `main` that release-plz reads. | — |
-| **Rustfmt** | Formatting, including the helper sub-crate | `cargo +nightly fmt --all -- --check` |
+| **Rustfmt** | Formatting, including the helper sub-crate | `cargo +nightly fmt --all -- --check`<br>`cargo +nightly fmt --manifest-path crates/openjd-sessions/src/helper/Cargo.toml --all -- --check` |
 | **Compliance** | The copyright header on new source files | `bash scripts/check_copyright_headers.sh` |
 
 **Rust code, tests, or doc comments**
 
 | Check | What it needs | Local command |
 |---|---|---|
-| **Build & Test** (Linux, macOS, Windows) | Release build; clippy with `-D warnings`, with all features on Linux; tests (nextest), doctests, and helper tests | `cargo clippy --all-features --all-targets --workspace -- -D warnings`<br>`cargo test --workspace` |
+| **Build & Test** (Linux, macOS, Windows) | Release build; clippy with `-D warnings`, with all features on Linux; tests (nextest), doctests, and helper tests | `cargo clippy --all-features --all-targets --workspace -- -D warnings`<br>`cargo test --workspace`<br>Helper: `cargo clippy --manifest-path crates/openjd-sessions/src/helper/Cargo.toml -- -D warnings` and `cargo test --manifest-path crates/openjd-sessions/src/helper/Cargo.toml` |
 | **Documentation** | `cargo doc` with `-D warnings` | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace` |
 | **Public API listings** (Linux, Windows) | `specs/<crate>/public-api*.txt` matches the code | `bash scripts/check_public_api.sh` (`--update` to regenerate; needs the pinned nightly and cargo-public-api named in the script) |
 | **Analyze (rust)** | CodeQL | — |
@@ -292,7 +292,7 @@ pushing. Run locally whatever your change can affect.
 | **MSRV** | Dependencies, the toolchain, or language features in use changed | `cargo +1.97.0 check --workspace` |
 | **Conformance** (Linux, macOS, Windows) | Template validation or job execution behavior changed | See "Running the Conformance Suite" |
 | **Cross-User Tests** (ldap, localuser, Windows) | Sessions' cross-user or permissions code changed | ldap and localuser: `scripts/run_cross_user_tests.sh` (needs Docker). Windows needs a Windows test user; see the `cross-user-windows` job in `ci.yml` |
-| **openjd-for-js** (WASM + JS tests) | That crate, its dependencies, or `wasm-bindgen` changed | See `crates/openjd-for-js/README.md` |
+| **openjd-for-js** (WASM + JS tests) | That crate, its dependencies, or `wasm-bindgen` changed | `cargo clippy -p openjd-for-js --all-targets -- -D warnings`<br>`cargo clippy -p openjd-for-js --target wasm32-unknown-unknown --all-targets -- -D warnings`<br>`cargo test -p openjd-for-js`; the wasm build and JS tests: see `crates/openjd-for-js/README.md` |
 | **Fuzz** (`fuzz.yml`; runs on PRs but does not block merging) | Library behavior, public API, dependencies, or `fuzz/` changed | `cargo test --manifest-path fuzz/Cargo.toml --no-default-features`; see "Fuzzing" |
 | **Workflow lint** (not run in CI) | `.github/workflows/` changed. Only `ci.yml` and `codeql.yml` produce required checks, so a broken parse anywhere else would merge | `actionlint` |
 | **S3 integration tests** (not run in CI) | `openjd-snapshots` changed | See "S3 Integration Tests" |

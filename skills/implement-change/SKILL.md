@@ -134,7 +134,9 @@ Instruct the auditor to:
 
 - run the capability probe from quality-criteria §6 "Verifier capability"
   first, with `bash scripts/audit_probe.sh <crate> <id>`, and return
-  `ENVIRONMENT FAILURE` instead of findings if it fails;
+  `ENVIRONMENT FAILURE` instead of findings if it fails because of the
+  environment. A probe that fails because the code under audit does not
+  compile, or no longer has the item the probe calls, is a finding;
 - not re-run the checks CI enforces (`AGENTS.md` "Before Opening a PR"). The
   CI run, or the step 4 results until there is one, is the evidence for them;
 - write, compile, and run its own probe tests to explore the change and to

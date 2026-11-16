@@ -18,7 +18,10 @@
 #
 # Exits 0 and prints "capability probe passed" on success. On failure, prints
 # "ENVIRONMENT FAILURE", the step that failed, the command, and its output,
-# and exits 1. Exits 2 on a usage error.
+# and exits 1. Exits 2 on a usage error. A step 2 failure can also come from
+# the code under review (it does not compile, or lost the item the probe
+# calls); the output shows which, and that case is a finding, not an
+# environment failure.
 
 set -euo pipefail
 
