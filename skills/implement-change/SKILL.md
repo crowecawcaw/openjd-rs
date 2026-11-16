@@ -221,9 +221,13 @@ Tell the user:
   reasons), and findings withdrawn;
 - any out-of-scope findings that need a decision.
 
-Push and open a PR only when the user asks. A PR opened before an audit round
-comes back clean stays a draft until one does. Put the checks run and the
-audit summary in the PR description, so reviewers can see what was checked.
+You may push the branch as a draft PR at any point (step 4). Mark it ready for
+review only after an audit round comes back clean, or the user accepts the
+outstanding findings, and only when the user asks. Give the PR title a
+conventional-commit summary of the whole change, not of the last stage:
+PRs are squash-merged, so the title becomes the commit on `main` that
+release-plz reads. Put the checks run and the audit summary in the PR
+description, so reviewers can see what was checked.
 
 ## Commits
 
@@ -259,7 +263,7 @@ audit goes. It never permits skipping one.
 | Change | Auditors per round | Criteria emphasis |
 |--------|--------------------|-------------------|
 | Docs, comments, or specs only, with no behavior change | 1 | Q1, Q8 (does the text match the code?), Q9 |
-| CI workflows, skills, or process docs | 1 | Q1, Q8, Q9 (any tool allowlist covers the new instructions) |
+| CI workflows, skills, or process docs | 1 | Q1, Q8, Q9 (workflows parse under `actionlint`, and any tool allowlist covers the new instructions) |
 | Dependency or lockfile bump | 1 | Q2 (API breakage in dependents' use), Q8 |
 | Ordinary code change inside one crate | 1 | All criteria, Q4 with at least one mutation per new behavior |
 | Public API change, cross-crate change, or new feature | 2–4 with disjoint angles (§6 "Verifier rules", item 1), each mutation auditor in its own worktree | All criteria |

@@ -262,7 +262,7 @@ fn empty_command() {
 
 ## Before Opening a PR
 
-CI enforces every check below, except where a row says otherwise. This list
+CI runs every check below, except where a row says otherwise. This list
 tells you what a PR will be judged on, so you can catch failures before
 pushing. Run locally whatever your change can affect.
 
@@ -271,7 +271,7 @@ pushing. Run locally whatever your change can affect.
 | Check | What it needs | Local command |
 |---|---|---|
 | **DCO** | Every commit carries a `Signed-off-by:` line matching its author. Sign off as you commit: fixing a missed one later means rewriting history. | `git commit -s` |
-| **Semantic PR** | The PR title is a [conventional commit](https://www.conventionalcommits.org/) summary of the whole change. PRs are squash-merged, so the title becomes the commit on `main` that release-plz reads. | — |
+| **Semantic PR** | Passes when the PR title or at least one commit is a [conventional commit](https://www.conventionalcommits.org/), so it does not check the title by itself. Give the title a conventional-commit summary of the whole change: PRs are squash-merged, so the title becomes the commit on `main` that release-plz reads. | — |
 | **Rustfmt** | Formatting, including the helper sub-crate | `cargo +nightly fmt --all -- --check` |
 | **Compliance** | The copyright header on new source files | `bash scripts/check_copyright_headers.sh` |
 
@@ -288,12 +288,13 @@ pushing. Run locally whatever your change can affect.
 
 | Check | Relevant when | Local command |
 |---|---|---|
-| **cargo-deny** | `Cargo.lock` or dependencies changed | `cargo deny check` (and with `--manifest-path crates/openjd-sessions/src/helper/Cargo.toml`) |
+| **cargo-deny** | `Cargo.lock` or dependencies changed | `cargo deny check`<br>`cargo deny --manifest-path crates/openjd-sessions/src/helper/Cargo.toml check` |
 | **MSRV** | Dependencies, the toolchain, or language features in use changed | `cargo +1.97.0 check --workspace` |
 | **Conformance** (Linux, macOS, Windows) | Template validation or job execution behavior changed | See "Running the Conformance Suite" |
-| **Cross-User Tests** (ldap, localuser, Windows) | Sessions' cross-user or permissions code changed | `scripts/run_cross_user_tests.sh` (needs Docker) |
+| **Cross-User Tests** (ldap, localuser, Windows) | Sessions' cross-user or permissions code changed | ldap and localuser: `scripts/run_cross_user_tests.sh` (needs Docker). Windows needs a Windows test user; see the `cross-user-windows` job in `ci.yml` |
 | **openjd-for-js** (WASM + JS tests) | That crate, its dependencies, or `wasm-bindgen` changed | See `crates/openjd-for-js/README.md` |
 | **Fuzz** (`fuzz.yml`; runs on PRs but does not block merging) | Library behavior, public API, dependencies, or `fuzz/` changed | `cargo test --manifest-path fuzz/Cargo.toml --no-default-features`; see "Fuzzing" |
+| **Workflow lint** (not run in CI) | `.github/workflows/` changed. Only `ci.yml` and `codeql.yml` produce required checks, so a broken parse anywhere else would merge | `actionlint` |
 | **S3 integration tests** (not run in CI) | `openjd-snapshots` changed | See "S3 Integration Tests" |
 
 The helper sub-crate's tracked manifest is `Cargo.bundled.toml`. Copy it to

@@ -6,7 +6,9 @@
 # Runs the verifier capability probe from docs/dev/quality-criteria.md §6
 # "Verifier capability": writes a scratch integration test that calls one
 # public item of <crate>, runs it with cargo, confirms that it passed, deletes
-# it, and confirms that `git status --short` is back to where it started.
+# it, and confirms that `git status --short` no longer lists it. Only the
+# probe's own file is checked, so verifiers probing the same tree at once do
+# not see each other's probes as a change.
 #
 # Usage: scripts/audit_probe.sh <crate> <id>
 #
@@ -69,9 +71,6 @@ fail() {
     exit 1
 }
 
-before=$(git -C "$ROOT" status --short) ||
-    fail "0 (record the tree state)" "git -C $ROOT status --short"
-
 # The scratch file goes however the script exits.
 trap 'rm -f "$file"' EXIT
 
@@ -94,13 +93,13 @@ fi
 grep -q "test result: ok\. 1 passed" <<<"$out" ||
     fail "2 (run the probe: expected '1 passed')" "$test_cmd" "$out"
 
-# Step 3: delete it, and confirm the tree is back to where it started.
+# Step 3: delete it, and confirm git no longer sees it.
 rm -f "$file" || fail "3 (delete the probe)" "rm -f $file"
-after=$(git -C "$ROOT" status --short) ||
-    fail "3 (record the tree state)" "git -C $ROOT status --short"
-if [[ $before != "$after" ]]; then
-    fail "3 (tree differs from before the probe)" "git -C $ROOT status --short" \
-        "$(diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") || true)"
+if ! left=$(git -C "$ROOT" status --short -- "$file" 2>&1); then
+    fail "3 (check the tree)" "git -C $ROOT status --short -- $file" "$left"
+fi
+if [[ -n $left ]]; then
+    fail "3 (the probe is still in the tree)" "git -C $ROOT status --short -- $file" "$left"
 fi
 
 echo "capability probe passed: $crate ($test_cmd)"

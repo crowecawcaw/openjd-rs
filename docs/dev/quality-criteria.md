@@ -193,7 +193,8 @@ Before doing anything else, each verifier runs a capability probe:
 
 For openjd-expr, openjd-model, openjd-sessions, and openjd-snapshots,
 `bash scripts/audit_probe.sh <crate> <id>` performs all three steps with a
-fixed probe. It prints `capability probe passed` on success, and on failure
+fixed probe. In step 3 it checks only its own file, so verifiers probing the
+same tree at once do not trip each other. It prints `capability probe passed` on success, and on failure
 prints `ENVIRONMENT FAILURE` with the step, the command, and its output. For
 any other crate, write the probe by hand.
 
