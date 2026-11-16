@@ -101,7 +101,7 @@ gets its own criterion.
 
 **Q9. Repository conventions.** Work MUST pass every check that CI runs on it.
 `.github/workflows/ci.yml` is authoritative for the exact commands, and the
-CI Pipeline table in `AGENTS.md` summarizes them. They include formatting,
+"Before Opening a PR" list in `AGENTS.md` summarizes them. They include formatting,
 clippy with `-D warnings`, build, tests, conformance, docs with
 `-D warnings`, `cargo deny`, MSRV, the copyright-header check, the public API
 listings, cross-user tests, and the `openjd-for-js` build. Each of these runs on both the workspace and the
@@ -190,6 +190,12 @@ Before doing anything else, each verifier runs a capability probe:
    output reports the test as run and passed (`1 passed`).
 3. Delete the file, and confirm that `git status --short` matches the state
    before step 1.
+
+For openjd-expr, openjd-model, openjd-sessions, and openjd-snapshots,
+`bash scripts/audit_probe.sh <crate> <id>` performs all three steps with a
+fixed probe. It prints `capability probe passed` on success, and on failure
+prints `ENVIRONMENT FAILURE` with the step, the command, and its output. For
+any other crate, write the probe by hand.
 
 If any step fails because of the environment rather than a mistake in the
 probe, the verifier MUST stop and return the verdict **`ENVIRONMENT FAILURE`**

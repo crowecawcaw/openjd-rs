@@ -424,7 +424,7 @@ jobs:
           #     dated name sidesteps both: the path never already exists.
           claude_args: |
             --model us.anthropic.claude-opus-5
-            --allowedTools "Task,Read,Glob,Grep,Write,Edit,Bash(cd openjd-rs:*),Bash(cargo build:*),Bash(cargo test:*),Bash(cargo clippy:*),Bash(cargo fmt:*),Bash(python3:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(ls:*),Bash(diff:*),Bash(cp:*),Bash(mv:*),Bash(find:*),Bash(rm crates/:*),Bash(rm -f crates/:*),Bash(rm openjd-rs/crates/:*),Bash(rm -f openjd-rs/crates/:*),Bash(rm /tmp/:*),Bash(rm -f /tmp/:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git worktree:*),Bash(git -C openjd-rs status:*),Bash(git -C openjd-rs diff:*),Bash(git -C openjd-rs log:*),Bash(git -C openjd-rs worktree:*),Bash(git show HEAD::*),Bash(cargo mutants:*)"
+            --allowedTools "Task,Read,Glob,Grep,Write,Edit,Bash(cd openjd-rs:*),Bash(bash scripts/audit_probe.sh:*),Bash(bash openjd-rs/scripts/audit_probe.sh:*),Bash(cargo build:*),Bash(cargo test:*),Bash(cargo clippy:*),Bash(cargo fmt:*),Bash(python3:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(ls:*),Bash(diff:*),Bash(cp:*),Bash(mv:*),Bash(find:*),Bash(rm crates/:*),Bash(rm -f crates/:*),Bash(rm openjd-rs/crates/:*),Bash(rm -f openjd-rs/crates/:*),Bash(rm /tmp/:*),Bash(rm -f /tmp/:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git worktree:*),Bash(git -C openjd-rs status:*),Bash(git -C openjd-rs diff:*),Bash(git -C openjd-rs log:*),Bash(git -C openjd-rs worktree:*),Bash(git show HEAD::*),Bash(cargo mutants:*)"
 
       # ---- outputs ------------------------------------------------------------
 

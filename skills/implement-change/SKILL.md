@@ -8,8 +8,8 @@ tags: [openjd, rust, implementation, audit, quality]
 
 ## Overview
 
-Every change to openjd-rs goes through one loop: implement it, pass the
-mechanical gates, have an independent auditor check it against
+Every change to openjd-rs goes through one loop: implement it, run the checks
+it can affect, have an independent auditor check it against
 [`docs/dev/quality-criteria.md`](../../docs/dev/quality-criteria.md), fix what the audit
 confirms, and repeat until the audit comes back clean.
 
@@ -88,59 +88,30 @@ current behavior follow quality-criteria §3: cite `file:line`, or run it.
 
 ### 4. Gate
 
-Run the CI checks that Q9 requires and that the change can affect, and fix
-any failures before auditing. An audit should not spend its time on what tools
-already catch. `.github/workflows/ci.yml` is authoritative for the exact
-commands. The common local set is:
+CI enforces the checks listed in `AGENTS.md` "Before Opening a PR" on every
+PR, and the audit relies on CI for them instead of repeating them. Before
+auditing, run locally the ones your change can affect, so that an audit round
+is not spent on what a tool catches. A docs-only change needs none of the Rust
+checks. A code change usually needs at least fmt, clippy, and tests.
 
-```bash
-cargo +nightly fmt --all -- --check
-cargo clippy --all-features --all-targets --workspace -- -D warnings
-cargo test --workspace
-```
+Two kinds of check need you, because CI does not block merging on them:
 
-Add the following checks when they apply:
-
-- `cargo doc --no-deps --workspace` with `RUSTDOCFLAGS=-D warnings`, when
-  doc comments or public items changed;
-- `bash scripts/check_public_api.sh`, when public items changed or a
-  dependency whose types appear in the public API changed. It needs the
-  pinned nightly toolchain and cargo-public-api named in the script. CI runs
-  it on Linux and Windows, and on a mismatch it uploads that OS's
-  regenerated listings as an artifact;
-- the helper sub-crate's fmt, clippy, and tests, when
-  `crates/openjd-sessions/src/helper/` changed. Its tracked manifest is
-  `Cargo.bundled.toml`, so first copy it to `Cargo.toml` as CI does;
-- `cargo deny check` on the workspace and on the helper sub-crate, when
-  `Cargo.lock` or any `Cargo.toml` dependency changed;
-- `cargo +<MSRV> check --workspace`, with the MSRV from `AGENTS.md`, when
-  dependencies, the toolchain, or language features in use changed;
-- the `openjd-for-js` wasm build and vitest suite, and its wasm32 clippy
-  (`cargo clippy -p openjd-for-js --target wasm32-unknown-unknown
-  --all-targets -- -D warnings`), when that crate, its dependencies, or
-  `wasm-bindgen` changed (see `AGENTS.md` on the `wasm-bindgen-cli` pin);
-- the cross-user tests (see `AGENTS.md`), when sessions' cross-user or
-  permissions code changed;
-- the relevant slice of the conformance suite (see `AGENTS.md`), when
-  template validation or job execution behavior changed;
-- the S3 integration tests, when `openjd-snapshots` changed (see `AGENTS.md`);
-- `scripts/check_copyright_headers.sh`, when files were added;
 - the fuzz crate's replay tests (`cargo test --manifest-path fuzz/Cargo.toml
   --no-default-features`), fmt, and clippy (`--no-default-features --lib
-  --tests --examples`, as `fuzz.yml` runs it), when library behavior, public API,
-  dependencies, or `fuzz/` changed; and
+  --tests --examples`, as `fuzz.yml` runs it), when library behavior, public
+  API, dependencies, or `fuzz/` changed; and
   `python3 scripts/check_fuzz_api_coverage.py --generate` (Python 3.11+,
   pinned nightly, cargo-llvm-cov), when public functions were added or
-  removed. See `AGENTS.md` "Fuzzing".
+  removed. See `AGENTS.md` "Fuzzing";
+- the S3 integration tests, when `openjd-snapshots` changed (see `AGENTS.md`).
+  CI does not run them at all.
 
-If a check cannot run locally (no Docker, no test user, no S3 bucket), say so
-in the audit inputs and the final summary, and rely on CI for it. Local
-clippy, `cargo doc`, and `check_public_api.sh` only see the host's `cfg`, so
-a change that touches `#[cfg(unix)]` or `#[cfg(windows)]` public items also
-needs the other platforms' CI results before the gate counts as passed.
+You may push the topic branch as a draft PR at any point, so that CI runs the
+checks you cannot run locally: other platforms, Docker, a test user. Keep the
+PR a draft until an audit round comes back clean (step 7).
 
-Record each command and its result. They go into the audit inputs, the
-commit message, and the final summary.
+Record each command you ran and its result, and the CI run if there is one.
+They go into the audit inputs, the commit message, and the final summary.
 
 Then make the **implement commit** (see "Commits").
 
@@ -152,7 +123,8 @@ Give the auditor these inputs:
 2. the commit range under audit: every commit on the branch since the merge
    base (`git log -p $(git merge-base HEAD origin/main)..HEAD`, using the PR's
    target branch in place of `origin/main` if it differs);
-3. the gate results from step 4;
+3. the checks run in step 4 and their results, and the CI run for the branch
+   if it has been pushed;
 4. `docs/dev/quality-criteria.md`, which the auditor MUST read.
 
 The working tree MUST be clean when the audit starts, with everything under
@@ -161,7 +133,10 @@ audit committed.
 Instruct the auditor to:
 
 - run the capability probe from quality-criteria §6 "Verifier capability"
-  first, and return `ENVIRONMENT FAILURE` instead of findings if it fails;
+  first, with `bash scripts/audit_probe.sh <crate> <id>`, and return
+  `ENVIRONMENT FAILURE` instead of findings if it fails;
+- not re-run the checks CI enforces (`AGENTS.md` "Before Opening a PR"). The
+  CI run, or the step 4 results until there is one, is the evidence for them;
 - write, compile, and run its own probe tests to explore the change and to
   produce the evidence §3 requires. Reading alone is not enough to confirm a
   bug, a gap in test coverage, or a fix;
@@ -246,7 +221,8 @@ Tell the user:
   reasons), and findings withdrawn;
 - any out-of-scope findings that need a decision.
 
-Push and open a PR only when the user asks. Put the gate results and the
+Push and open a PR only when the user asks. A PR opened before an audit round
+comes back clean stays a draft until one does. Put the checks run and the
 audit summary in the PR description, so reviewers can see what was checked.
 
 ## Commits
@@ -272,12 +248,8 @@ Rules for every stage commit:
   the change.
 - Stage specific files, never `git add .`, and confirm that no
   `audit_probe_*` file is included.
-- Sign off each commit (`git commit -s`).
 - Add new commits rather than amending or rebasing earlier stages away. The
   stage history is the record of the loop.
-- PRs are squash-merged, so the PR title becomes the commit on `main` that
-  release-plz reads. Give it a conventional-commit summary of the whole
-  change, not of the last stage.
 
 ## Audit depth
 
@@ -287,8 +259,8 @@ audit goes. It never permits skipping one.
 | Change | Auditors per round | Criteria emphasis |
 |--------|--------------------|-------------------|
 | Docs, comments, or specs only, with no behavior change | 1 | Q1, Q8 (does the text match the code?), Q9 |
-| CI workflows, skills, or process docs | 1 | Q1, Q8, Q9 (workflows parse, and any tool allowlist covers the new instructions) |
-| Dependency or lockfile bump | 1 | Q9 (`cargo deny`, MSRV), Q2 (API breakage in dependents' use), Q8 |
+| CI workflows, skills, or process docs | 1 | Q1, Q8, Q9 (any tool allowlist covers the new instructions) |
+| Dependency or lockfile bump | 1 | Q2 (API breakage in dependents' use), Q8 |
 | Ordinary code change inside one crate | 1 | All criteria, Q4 with at least one mutation per new behavior |
 | Public API change, cross-crate change, or new feature | 2–4 with disjoint angles (§6 "Verifier rules", item 1), each mutation auditor in its own worktree | All criteria |
 

@@ -26,9 +26,10 @@ judges the change against [`docs/dev/quality-criteria.md`](docs/dev/quality-crit
 which is the single source of truth for this repo's quality bar. The
 [`eval-crate`](skills/eval-crate/SKILL.md) skill applies the same criteria to
 whole crates. Each stage of the loop is committed on a topic branch as the
-skill describes. A change is not done, and must not be pushed or proposed for
-merge, until an audit round comes back clean (as the skill defines it) or the
-user accepts the outstanding findings.
+skill describes. A change may be pushed as a draft PR at any point, so CI runs
+on it, but it is not done, and must not be marked ready for review or merged,
+until an audit round comes back clean (as the skill defines it) or the user
+accepts the outstanding findings.
 
 The only exemptions are committing a verbatim `eval-crate` baseline report and
 bot-generated PRs (release-plz, dependabot), as the skill describes.
@@ -259,26 +260,44 @@ fn empty_command() {
 - Prefer `Result` types over panicking.
 - See [DEVELOPMENT.md](DEVELOPMENT.md) for more.
 
-## CI Pipeline
+## Before Opening a PR
 
-PRs run these checks (all must pass):
+CI enforces every check below, except where a row says otherwise. This list
+tells you what a PR will be judged on, so you can catch failures before
+pushing. Run locally whatever your change can affect.
 
-| Job | What it does |
-|-----|-------------|
-| **Rustfmt** | `cargo fmt --all -- --check` (nightly) — includes the helper sub-crate |
-| **cargo-deny** | Licenses, bans, sources, and advisories — workspace and helper sub-crate |
-| **Clippy** | `cargo clippy` on Linux, Windows, macOS — includes the helper binary |
-| **Build** | Release build on all three platforms |
-| **Test** | `cargo test --workspace` + helper tests on all three platforms |
-| **Conformance** | Full OpenJD conformance suite (1,038 tests) on all three platforms |
-| **MSRV** | `cargo check --workspace` with Rust 1.97.0 |
-| **Documentation** | `cargo doc --no-deps --workspace` with `-D warnings` |
-| **Compliance** | Copyright header check |
-| **Public API** | `scripts/check_public_api.sh` on Linux and Windows: the committed `specs/<crate>/public-api*.txt` listings match the code |
-| **Cross-User (Linux)** | Docker-based cross-user tests: localuser and LDAP variants |
-| **Cross-User (Windows)** | Windows cross-user and permissions tests with a temporary test user |
-| **openjd-for-js** | Clippy (host and wasm32) and Rust tests for the crate, then builds the wasm32 crate with `wasm-bindgen` and runs the vitest suite |
-| **Fuzz** (`fuzz.yml`, not a required check) | Corpus replay on all three platforms; libFuzzer under ASan over every target in one job on Linux (15 s per target on PRs, 3 min nightly, corpus cached across runs), plus an ASan build and replay of one target on macOS and Windows; public-API fuzz-coverage gate |
+**Every PR**
+
+| Check | What it needs | Local command |
+|---|---|---|
+| **DCO** | Every commit carries a `Signed-off-by:` line matching its author. Sign off as you commit: fixing a missed one later means rewriting history. | `git commit -s` |
+| **Semantic PR** | The PR title is a [conventional commit](https://www.conventionalcommits.org/) summary of the whole change. PRs are squash-merged, so the title becomes the commit on `main` that release-plz reads. | — |
+| **Rustfmt** | Formatting, including the helper sub-crate | `cargo +nightly fmt --all -- --check` |
+| **Compliance** | The copyright header on new source files | `bash scripts/check_copyright_headers.sh` |
+
+**Rust code, tests, or doc comments**
+
+| Check | What it needs | Local command |
+|---|---|---|
+| **Build & Test** (Linux, macOS, Windows) | Release build; clippy with `-D warnings`, with all features on Linux; tests (nextest), doctests, and helper tests | `cargo clippy --all-features --all-targets --workspace -- -D warnings`<br>`cargo test --workspace` |
+| **Documentation** | `cargo doc` with `-D warnings` | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace` |
+| **Public API listings** (Linux, Windows) | `specs/<crate>/public-api*.txt` matches the code | `bash scripts/check_public_api.sh` (`--update` to regenerate; needs the pinned nightly and cargo-public-api named in the script) |
+| **Analyze (rust)** | CodeQL | — |
+
+**Only when the change touches the area**
+
+| Check | Relevant when | Local command |
+|---|---|---|
+| **cargo-deny** | `Cargo.lock` or dependencies changed | `cargo deny check` (and with `--manifest-path crates/openjd-sessions/src/helper/Cargo.toml`) |
+| **MSRV** | Dependencies, the toolchain, or language features in use changed | `cargo +1.97.0 check --workspace` |
+| **Conformance** (Linux, macOS, Windows) | Template validation or job execution behavior changed | See "Running the Conformance Suite" |
+| **Cross-User Tests** (ldap, localuser, Windows) | Sessions' cross-user or permissions code changed | `scripts/run_cross_user_tests.sh` (needs Docker) |
+| **openjd-for-js** (WASM + JS tests) | That crate, its dependencies, or `wasm-bindgen` changed | See `crates/openjd-for-js/README.md` |
+| **Fuzz** (`fuzz.yml`; runs on PRs but does not block merging) | Library behavior, public API, dependencies, or `fuzz/` changed | `cargo test --manifest-path fuzz/Cargo.toml --no-default-features`; see "Fuzzing" |
+| **S3 integration tests** (not run in CI) | `openjd-snapshots` changed | See "S3 Integration Tests" |
+
+The helper sub-crate's tracked manifest is `Cargo.bundled.toml`. Copy it to
+`Cargo.toml` before running its checks locally, as CI does.
 
 ### Fuzzing
 
@@ -301,14 +320,6 @@ If a dependency update bumps `wasm-bindgen`, also bump `WASM_BINDGEN_VERSION`
 in the `openjd-for-js` job in `.github/workflows/ci.yml`, which pins
 `wasm-bindgen-cli` — the CLI and the linked Wasm schema version must
 match exactly.
-
-Before recommending the user can push, the `implement-change` loop must be
-complete. Its gate step includes at minimum:
-```bash
-cargo +nightly fmt --all -- --check
-cargo clippy --all-features --all-targets --workspace -- -D warnings
-cargo test --workspace
-```
 
 ## Releasing
 
